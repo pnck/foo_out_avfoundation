@@ -8,6 +8,9 @@
 
 /* Begin PBXBuildFile section */
 		A35F92E52BD82FC400ABAABA /* foo_out_avfoundation.component in CopyFiles */ = {isa = PBXBuildFile; fileRef = A3B7380C2BCCBC6700DF7424 /* foo_out_avfoundation.component */; settings = {ATTRIBUTES = (CodeSignOnCopy, ); }; };
+		A3A6F8662E4605DA0094FA64 /* AVFoundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A3A6F8642E4605DA0094FA64 /* AVFoundation.framework */; };
+		A3A6F8672E4605DA0094FA64 /* AVFAudio.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A3A6F8652E4605DA0094FA64 /* AVFAudio.framework */; };
+		A3A6F8692E4605E20094FA64 /* CoreAudio.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A3A6F8682E4605E20094FA64 /* CoreAudio.framework */; };
 		A3B738312BCCCF1A00DF7424 /* libpfc-Mac.a in Frameworks */ = {isa = PBXBuildFile; fileRef = A3B738302BCCCF1A00DF7424 /* libpfc-Mac.a */; };
 		A3B738742BCE313B00DF7424 /* libfoobar2000_component_client.a in Frameworks */ = {isa = PBXBuildFile; fileRef = A3B738732BCE313B00DF7424 /* libfoobar2000_component_client.a */; };
 		A3B738762BCE313B00DF7424 /* libfoobar2000_SDK.a in Frameworks */ = {isa = PBXBuildFile; fileRef = A3B738752BCE313B00DF7424 /* libfoobar2000_SDK.a */; };
@@ -30,6 +33,9 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		A3A6F8642E4605DA0094FA64 /* AVFoundation.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = AVFoundation.framework; path = System/Library/Frameworks/AVFoundation.framework; sourceTree = SDKROOT; };
+		A3A6F8652E4605DA0094FA64 /* AVFAudio.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = AVFAudio.framework; path = System/Library/Frameworks/AVFAudio.framework; sourceTree = SDKROOT; };
+		A3A6F8682E4605E20094FA64 /* CoreAudio.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = CoreAudio.framework; path = System/Library/Frameworks/CoreAudio.framework; sourceTree = SDKROOT; };
 		A3B7380C2BCCBC6700DF7424 /* foo_out_avfoundation.component */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = foo_out_avfoundation.component; sourceTree = BUILT_PRODUCTS_DIR; };
 		A3B738302BCCCF1A00DF7424 /* libpfc-Mac.a */ = {isa = PBXFileReference; explicitFileType = archive.ar; path = "libpfc-Mac.a"; sourceTree = BUILT_PRODUCTS_DIR; };
 		A3B738732BCE313B00DF7424 /* libfoobar2000_component_client.a */ = {isa = PBXFileReference; explicitFileType = archive.ar; path = libfoobar2000_component_client.a; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -48,11 +54,14 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				A3A6F8692E4605E20094FA64 /* CoreAudio.framework in Frameworks */,
 				A3B738B52BD2634E00DF7424 /* libshared.a in Frameworks */,
 				A3B738742BCE313B00DF7424 /* libfoobar2000_component_client.a in Frameworks */,
 				A3B738762BCE313B00DF7424 /* libfoobar2000_SDK.a in Frameworks */,
 				A3B738B22BD22E9600DF7424 /* Cocoa.framework in Frameworks */,
 				A3B738AF2BD2279100DF7424 /* libfoobar2000_SDK_helpers.a in Frameworks */,
+				A3A6F8672E4605DA0094FA64 /* AVFAudio.framework in Frameworks */,
+				A3A6F8662E4605DA0094FA64 /* AVFoundation.framework in Frameworks */,
 				A3B738312BCCCF1A00DF7424 /* libpfc-Mac.a in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -80,6 +89,9 @@
 		A3B738292BCCCF1A00DF7424 /* Frameworks */ = {
 			isa = PBXGroup;
 			children = (
+				A3A6F8682E4605E20094FA64 /* CoreAudio.framework */,
+				A3A6F8652E4605DA0094FA64 /* AVFAudio.framework */,
+				A3A6F8642E4605DA0094FA64 /* AVFoundation.framework */,
 				A3B738B02BD22E7300DF7424 /* libshared.a */,
 				A3B738AE2BD2279100DF7424 /* libfoobar2000_SDK_helpers.a */,
 				A3B738AC2BD226CE00DF7424 /* Cocoa.framework */,

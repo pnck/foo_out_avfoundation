@@ -339,3 +339,6 @@ fastlane/test_output
 
 # distribution
 dist/
+
+# tests
+venv/
