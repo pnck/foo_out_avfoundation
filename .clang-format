@@ -46,7 +46,7 @@ ColumnLimit: '140'
 IndentWidth: '4'
 
 # Targeted language
-Language: Cpp
+# Language: Cpp
 
 # No indentation for namespaces.
 NamespaceIndentation: All
