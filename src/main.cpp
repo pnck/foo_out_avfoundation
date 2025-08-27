@@ -5,14 +5,23 @@
 //  Created by pnck on 2025/8/7.
 //
 
+/*
+  Change Log
+
+  Version 0.0.1
+  - Initial version
+  - Buggy but working, with spatialized stereo available
+
+*/
+
 #include "predef.h"
 
-#define FALLBACK_VERSION "0.1.0"
+#define FALLBACK_VERSION "0.0.1"
 
 #ifdef CURRENT_VERSION
 #define VER_STR(X) #X
 #define EXTRACT(X) VER_STR(X)
-#define EXTRACT(CURRENT_VERSION)
+#define COMPONENT_VERSION EXTRACT(CURRENT_VERSION)
 #else
 #define COMPONENT_VERSION FALLBACK_VERSION
 #endif
