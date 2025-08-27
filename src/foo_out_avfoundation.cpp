@@ -7,6 +7,7 @@
 
 #include "predef.h"
 #include "common/consts.hpp"
+#include "common/utils.hpp"
 #include "engine.h"
 #include <thread>
 #include <fstream>
@@ -19,21 +20,6 @@
 
 namespace foo_out_avf
 {
-    std::vector<std::vector<t_float32>> noopt_deinterleave(const audio_chunk &p_chunk) {
-        const auto channels = p_chunk.get_channels();
-        const auto sample_count = p_chunk.get_sample_count();
-        const auto *data = p_chunk.get_data();
-
-        std::vector<std::vector<t_float32>> channel_data(channels);
-        for (size_t ch = 0; ch < channels; ++ch) {
-            channel_data[ch].resize(sample_count);
-            for (size_t i = 0; i < sample_count; ++i) {
-                channel_data[ch][i] = static_cast<t_float32>(data[i * channels + ch]);
-            }
-        }
-        return channel_data;
-    }
-
     class AVFOutput : public output_v6 {
     private:
         AVFEngine engine;
@@ -97,8 +83,8 @@ namespace foo_out_avf
         static bool g_supports_multiple_streams() { return false; }
         static bool g_advanced_settings_query() { return true; }
 
-        static bool g_needs_bitdepth_config() { return true; }
-        static bool g_needs_dither_config() { return true; }
+        static bool g_needs_bitdepth_config() { return false; }
+        static bool g_needs_dither_config() { return false; }
         static bool g_needs_device_list_prefixes() { return false; }
 
     public:
@@ -106,11 +92,8 @@ namespace foo_out_avf
 
             engine.setLogCallback([](const char *message) { FB2K_console_print(message); });
 
-            // Enable audio engine
             if (engine.enable()) {
                 is_active = true;
-                // Auto-configure for AirPods if connected
-                engine.configureForAirPods();
             }
         }
 
@@ -122,13 +105,8 @@ namespace foo_out_avf
         }
 
         static void g_enum_devices(output_device_enum_callback &p_callback) {
-            // Check if AirPods are connected to provide appropriate device name
-            AVFEngine temp_engine;
-            if (temp_engine.isAirPodsConnected()) {
-                p_callback.on_device(guid_output_device, "AVFoundation Output (Spatial Audio - AirPods)", 45);
-            } else {
-                p_callback.on_device(guid_output_device, "AVFoundation Output", 19);
-            }
+
+            p_callback.on_device(guid_output_device, "AVFoundation Output", 19);
         }
 
     public:
@@ -147,55 +125,72 @@ namespace foo_out_avf
                 return 0;
             }
 
-            auto channel_data = noopt_deinterleave(p_chunk);
-            std::vector<const float *> data_ptrs;
-            for (size_t ch = 0; ch < channels; ++ch) {
-                data_ptrs.emplace_back(channel_data[ch].data());
-            }
+            // Setup audio format if needed (this is safe to call multiple times)
+            engine.setupAudioFormat(sample_rate, channels);
+
+            // Convert from double (audio_sample) to float and keep interleaved format
+            const audio_sample *input_data = p_chunk.get_data();
+            std::vector<float> float_data(p_chunk.get_used_size());
+#if defined(AUDIO_MATH_NEON)
+            utils::neon_convert(input_data, float_data.data(), p_chunk.get_used_size());
+#else
+            fb2k_audio_math::convert(input_data, float_data.data(), p_chunk.get_used_size());
+#endif
 #ifdef ENABLE_AUDIO_DUMP
             audio_chunk_impl ac;
             ac.set_channels(1);
-            ac.set_data_32(channel_data[0].data(), sample_count, 1, sample_rate);
+            // Extract first channel for debugging
+            std::vector<float> first_channel(sample_count);
+            for (size_t i = 0; i < sample_count; i++) {
+                first_channel[i] = float_data[i * channels]; // First channel only
+            }
+            ac.set_data_32(first_channel.data(), sample_count, 1, sample_rate);
 
             // Debug: dump audio data to file
-
             debugDumpAudioData(ac);
 #endif
-            engine.feedAudioData(data_ptrs, sample_rate, channels, sample_count);
-            return sample_count;
+
+            size_t processed_samples = engine.feedAudioData(std::move(float_data), sample_rate, channels, sample_count);
+
+            return processed_samples;
         }
 
-        bool is_progressing() override { return is_active && !is_paused; }
+        bool is_progressing() override { return engine.isEnabled() && !engine.isPaused(); }
 
-        double get_latency() override { return 0.05; } // 50ms estimated latency
+        double get_latency() override {
+            if (is_active && !is_paused) {
+                // Return actual calculated latency based on pending buffers
+                return engine.getCurrentLatency();
+            } else {
+                // Return minimal latency when not active
+                return 0.01; // 10ms
+            }
+        }
 
         void process_samples(const audio_chunk &p_chunk) override { process_samples_v2(p_chunk); }
 
-        void update(bool &p_ready) override { p_ready = is_active; }
+        void update(bool &p_ready) override { p_ready = engine.isEnabled() && engine.isReadyForMoreMediaData(); }
 
         void pause(bool p_state) override {
             is_paused = p_state;
             if (p_state) {
-                // Clear buffer when pausing
-                engine.flush();
+                // Pause the engine (clears queue but keeps semaphore)
+                engine.pause();
+            } else {
+                // Resume the engine
+                engine.resume();
             }
         }
 
-        void flush() override {
-            if (is_active) {
-                engine.flush();
-            }
-        }
+        void flush() override { engine.flush(); }
 
         void force_play() override {
-            // Force play - ensure not in paused state
             is_paused = false;
+            engine.disable();
+            engine.enable();
         }
 
         void volume_set(double p_val) override { engine.setVolume(static_cast<float>(p_val)); }
-
-        // Additional method to get spatial audio status (for future use)
-        bool is_spatial_audio_active() const { return engine.isSpatialAudioEnabled() && engine.isAirPodsConnected(); }
     };
 
 } // namespace foo_out_avf

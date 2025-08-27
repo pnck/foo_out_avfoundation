@@ -15,33 +15,50 @@
 #import <AVFAudio/AVFAudio.h>
 #import <CoreAudio/CoreAudioTypes.h>
 
-@interface EngineManager : NSObject
+@interface AVFEngineImpl : NSObject
 
 - (instancetype)init;
 - (void)dealloc;
-// Audio data processing interface - expects f64le (double, little-endian, packed/interleaved) format
-// Audio data processing methods
-- (void)feedAudioData:(const float **)channelData sampleRate:(double)sampleRate channels:(int)channels frameCount:(size_t)frameCount;
+
+// Audio format setup - must be called before enable
+- (bool)setupAudioFormat:(uint32_t)sampleRate channels:(uint32_t)channels;
+
+// Audio data processing interface - expects interleaved float32 format
+- (size_t)feedAudioData:(std::vector<float>)audioData
+             sampleRate:(uint32_t)sampleRate
+               channels:(uint32_t)channels
+             frameCount:(size_t)frameCount;
+
 - (void)flush;
+- (void)pause;
+- (void)resume;
+
 // Audio interface status management
 - (bool)enable;
 - (void)disable;
-- (bool)isEnabled;
+
+// Sample queue configuration
+- (void)setQueueSize:(uint32_t)size;
+
 // Volume control
 - (void)setVolume:(float)volume;
 - (float)getVolume;
-// Spatial audio control interface
-- (void)enableSpatialAudio:(bool)enable;
-- (bool)isSpatialAudioEnabled;
+
+// Spatial audio control
 - (void)setListenerPosition:(float)x y:(float)y z:(float)z;
+- (void)setListenerOrientation:(float)yaw pitch:(float)pitch roll:(float)roll;
 - (void)setSourcePosition:(float)x y:(float)y z:(float)z;
-// AirPods detection and auto-configuration
-- (bool)isAirPodsConnected;
-- (void)configureForAirPods;
-// System audio configuration
-- (double)getSystemSampleRate;
+
+// Latency calculation
+- (double)getCurrentLatency;
+
 // Logging bridge for foobar2000 console
 - (void)setLogCallback:(void (*)(const char *))callback; // Pass nullptr to fallback to NSLog
+
+@property(nonatomic, readonly, getter=isEnabled) bool isEnabled;
+@property(nonatomic, readonly, getter=isPaused) bool isPaused;
+@property(nonatomic, readonly) uint32_t pendingBufferCount;
+@property(nonatomic, readonly, getter=isReadyForMoreMediaData) bool readyForMoreMediaData;
 
 @end
 #endif // __OBJC__
@@ -59,37 +76,42 @@ namespace foo_out_avf
         AVFEngine(const AVFEngine &) = delete;
         AVFEngine &operator=(const AVFEngine &) = delete;
 
-        void feedAudioData(std::vector<const t_float32 *> channelData, double sampleRate, int channels, size_t frameCount);
-        void flush();
+        // Audio format setup - must be called before enable
+        bool setupAudioFormat(double sampleRate, int channels);
 
+        size_t feedAudioData(std::vector<float>, uint32_t sampleRate, uint32_t channels, size_t sample_count);
+        void flush();
+        void pause();
+        void resume();
+
+        // Buffer configuration
         // Audio interface status management
         bool enable();
         void disable();
         bool isEnabled() const;
+        bool isPaused() const;
 
         // Volume control
         void setVolume(float volume);
         float getVolume() const;
 
-        // Spatial audio control methods
-        void enableSpatialAudio(bool enable);
-        bool isSpatialAudioEnabled() const;
         void setListenerPosition(float x, float y, float z);
+        void setListenerOrientation(float yaw, float pitch, float roll);
         void setSourcePosition(float x, float y, float z);
 
-        // AirPods detection and auto-configuration
-        bool isAirPodsConnected() const;
-        void configureForAirPods();
+        // Latency calculation
+        double getCurrentLatency() const;
 
-        // System audio configuration
-        double getSystemSampleRate() const;
+        // Buffer status query
+        uint32_t pendingBufferCount() const;
+        bool isReadyForMoreMediaData() const;
 
         // Logging bridge for foobar2000 console
         void setLogCallback(void (*callback)(const char *message)); // Pass nullptr to fallback to NSLog
 
     private:
         // Opaque pointer to hide Objective-C implementation
-        void *impl;
+        void *impl_ = nullptr;
     };
 
 } // namespace foo_out_avf

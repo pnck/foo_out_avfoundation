@@ -8,6 +8,7 @@
 
 /* Begin PBXBuildFile section */
 		A35F92E52BD82FC400ABAABA /* foo_out_avfoundation.component in CopyFiles */ = {isa = PBXBuildFile; fileRef = A3B7380C2BCCBC6700DF7424 /* foo_out_avfoundation.component */; settings = {ATTRIBUTES = (CodeSignOnCopy, ); }; };
+		A398A0DC2E5DB58600C8D3E2 /* CoreMedia.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A398A0DB2E5DB58600C8D3E2 /* CoreMedia.framework */; };
 		A3A6F8662E4605DA0094FA64 /* AVFoundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A3A6F8642E4605DA0094FA64 /* AVFoundation.framework */; };
 		A3A6F8672E4605DA0094FA64 /* AVFAudio.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A3A6F8652E4605DA0094FA64 /* AVFAudio.framework */; };
 		A3A6F8692E4605E20094FA64 /* CoreAudio.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A3A6F8682E4605E20094FA64 /* CoreAudio.framework */; };
@@ -33,6 +34,7 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		A398A0DB2E5DB58600C8D3E2 /* CoreMedia.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = CoreMedia.framework; path = System/Library/Frameworks/CoreMedia.framework; sourceTree = SDKROOT; };
 		A3A6F8642E4605DA0094FA64 /* AVFoundation.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = AVFoundation.framework; path = System/Library/Frameworks/AVFoundation.framework; sourceTree = SDKROOT; };
 		A3A6F8652E4605DA0094FA64 /* AVFAudio.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = AVFAudio.framework; path = System/Library/Frameworks/AVFAudio.framework; sourceTree = SDKROOT; };
 		A3A6F8682E4605E20094FA64 /* CoreAudio.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = CoreAudio.framework; path = System/Library/Frameworks/CoreAudio.framework; sourceTree = SDKROOT; };
@@ -54,6 +56,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				A398A0DC2E5DB58600C8D3E2 /* CoreMedia.framework in Frameworks */,
 				A3A6F8692E4605E20094FA64 /* CoreAudio.framework in Frameworks */,
 				A3B738B52BD2634E00DF7424 /* libshared.a in Frameworks */,
 				A3B738742BCE313B00DF7424 /* libfoobar2000_component_client.a in Frameworks */,
@@ -89,6 +92,7 @@
 		A3B738292BCCCF1A00DF7424 /* Frameworks */ = {
 			isa = PBXGroup;
 			children = (
+				A398A0DB2E5DB58600C8D3E2 /* CoreMedia.framework */,
 				A3A6F8682E4605E20094FA64 /* CoreAudio.framework */,
 				A3A6F8652E4605DA0094FA64 /* AVFAudio.framework */,
 				A3A6F8642E4605DA0094FA64 /* AVFoundation.framework */,
