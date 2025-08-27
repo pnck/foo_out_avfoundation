@@ -1,0 +1,73 @@
+name: Build All
+
+on:
+  push:
+    branches: ['main', 'dev', 'dev/*']
+
+  pull_request:
+    branches: ['main']
+
+  # Allows you to run this workflow manually from the Actions tab
+  workflow_dispatch:
+
+jobs:
+  build-macos:
+    name: Build
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        config: [Release, Debug]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-tags: true
+          fetch-depth: 0
+
+      - name: Setup Xcode
+        run: |
+          sudo xcode-select --switch /Applications/Xcode.app
+          xcodebuild -version
+
+      - name: Versioning
+        run: |
+          TAG=$(git describe --long --all)
+          VERSION=${TAG:6} 
+          echo "" >> src/predef.h
+          echo "#define CURRENT_VERSION $VERSION" >> src/predef.h
+          echo "----------------------------"
+          cat src/predef.h
+        shell: bash
+
+      - name: List Xcode schemes
+        run: |
+          if [ -f "foo_out_avfoundation.xcworkspace/contents.xcworkspacedata" ]; then
+            xcodebuild -list -workspace foo_out_avfoundation.xcworkspace
+          else
+            xcodebuild -list -project foo_out_avfoundation.xcodeproj
+          fi
+
+      - name: Build component
+        run: |
+          if [ -f "foo_out_avfoundation.xcworkspace/contents.xcworkspacedata" ]; then
+            xcodebuild clean build \
+              -workspace foo_out_avfoundation.xcworkspace \
+              -scheme foo_out_avfoundation \
+              -configuration ${{ matrix.config }} \
+              -sdk macosx
+          else
+            xcodebuild clean build \
+              -project foo_out_avfoundation.xcodeproj \
+              -target foo_out_avfoundation \
+              -configuration ${{ matrix.config }} \
+              -sdk macosx
+          fi
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: foo_out_avfoundation-macos-${{ matrix.config }}
+          path: ${{ github.workspace }}/dist
+          if-no-files-found: error
