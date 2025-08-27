@@ -49,20 +49,59 @@ jobs:
             xcodebuild -list -project foo_out_avfoundation.xcodeproj
           fi
 
-      - name: Build component
+      - name: Build component (Debug)
+        if: matrix.config == 'Debug'
         run: |
           if [ -f "foo_out_avfoundation.xcworkspace/contents.xcworkspacedata" ]; then
             xcodebuild clean build \
               -workspace foo_out_avfoundation.xcworkspace \
               -scheme foo_out_avfoundation \
               -configuration ${{ matrix.config }} \
-              -sdk macosx
+              -sdk macosx \
+              CODE_SIGN_IDENTITY="" \
+              CODE_SIGNING_REQUIRED=NO \
+              CODE_SIGNING_ALLOWED=NO \
+              DEVELOPMENT_TEAM=""
           else
             xcodebuild clean build \
               -project foo_out_avfoundation.xcodeproj \
               -target foo_out_avfoundation \
               -configuration ${{ matrix.config }} \
-              -sdk macosx
+              -sdk macosx \
+              CODE_SIGN_IDENTITY="" \
+              CODE_SIGNING_REQUIRED=NO \
+              CODE_SIGNING_ALLOWED=NO \
+              DEVELOPMENT_TEAM=""
+          fi
+
+      - name: Import Certificate
+        if: matrix.config == 'Release'
+        uses: apple-actions/import-codesign-certs@v1
+        with:
+          p12-file-base64: ${{ secrets.CERTIFICATES_P12_B64 }}
+          p12-password: ${{ secrets.CERTIFICATES_P12_PASSWORD }}
+
+      - name: Build component (Release)
+        if: matrix.config == 'Release'
+        run: |
+          if [ -f "foo_out_avfoundation.xcworkspace/contents.xcworkspacedata" ]; then
+            xcodebuild clean build \
+              -workspace foo_out_avfoundation.xcworkspace \
+              -scheme foo_out_avfoundation \
+              -configuration ${{ matrix.config }} \
+              -sdk macosx \
+              CODE_SIGN_IDENTITY="-" \
+              DEVELOPMENT_TEAM="${{ secrets.TEAM_ID }}" \
+              -allowProvisioningUpdates
+          else
+            xcodebuild clean build \
+              -project foo_out_avfoundation.xcodeproj \
+              -target foo_out_avfoundation \
+              -configuration ${{ matrix.config }} \
+              -sdk macosx \
+              CODE_SIGN_IDENTITY="-" \
+              DEVELOPMENT_TEAM="${{ secrets.TEAM_ID }}" \
+              -allowProvisioningUpdates
           fi
 
       - name: Upload Artifacts
