@@ -31,8 +31,7 @@
     AVAudioFormat *currentFormat;
 
     // Timestamp tracking for continuous audio stream
-    CMTime nextPresentationTime;
-    CMTime lastBufferPresentationTime; // For latency calculation
+    CMTime currentPresentationTime; // Current presentation time (base + accumulated offset)
     std::mutex timestampMutex;
 
     // Sample queue for smooth playback
@@ -71,11 +70,11 @@
             [synchronizer setDelaysRateChangeUntilHasSufficientMediaData:NO];
         }
 
-        nextPresentationTime = kCMTimeZero;
-        lastBufferPresentationTime = kCMTimeInvalid;
+        // Initialize timestamps (will be properly set in enable)
+        currentPresentationTime = kCMTimeInvalid;
 
         // Initialize sample queue with larger buffer to reduce glitches
-        maxQueueSize = 8; // Default to 8 buffers for smoother playback
+        maxQueueSize = 2;
         renderQueue = dispatch_queue_create("avfoundation-render-queue",
                                             dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL, QOS_CLASS_USER_INTERACTIVE, 0));
     } else {
@@ -198,22 +197,13 @@
         renderer.volume = 1.0;
         renderer.muted = NO;
 
-        // Reset timestamp tracking for new session
+        // Reset timestamp tracking for new session - get base time from synchronizer
         {
             std::lock_guard<std::mutex> lock(timestampMutex);
-            nextPresentationTime = kCMTimeZero;
-            lastBufferPresentationTime = kCMTimeInvalid;
+            currentPresentationTime = kCMTimeZero;
         }
 
-        // Clear sample queue
-        {
-            std::lock_guard<std::mutex> lock(sampleQueueMutex);
-            while (!sampleQueue.empty()) {
-                CMSampleBufferRef buffer = sampleQueue.front();
-                sampleQueue.pop();
-                CFRelease(buffer);
-            }
-        }
+        [self flush];
 
         // Start renderer to pull from sample queue
         __weak typeof(self) weakSelf = self;
@@ -226,7 +216,6 @@
                                         }];
 
         _isPaused = false;
-
         _isEnabled = true;
         [self logMessage:@"[AVF] Audio engine enabled successfully using sample buffer renderer"];
         return true;
@@ -245,20 +234,12 @@
         // Stop requesting data from renderer
         [renderer stopRequestingMediaData];
 
-        // Clear sample queue
-        {
-            std::lock_guard<std::mutex> lock(sampleQueueMutex);
-            while (!sampleQueue.empty()) {
-                CMSampleBufferRef buffer = sampleQueue.front();
-                sampleQueue.pop();
-                CFRelease(buffer);
-            }
+        if (synchronizer != nil) {
+            [synchronizer setRate:0.0];
         }
 
-        if (synchronizer != nil) {
-            synchronizer.rate = 0.0;
-            [renderer flush];
-        }
+        [self flush];
+        currentPresentationTime = kCMTimeInvalid;
     }
 
     _isEnabled = false;
@@ -276,7 +257,7 @@
 
     if (@available(macOS 11.0, *)) {
         // Stop the synchronizer to pause playback, but keep all buffers in queue
-        synchronizer.rate = 0.0;
+        [synchronizer setRate:0.0];
         [self logMessage:@"[AVF] Paused audio playback"];
     }
 }
@@ -289,7 +270,7 @@
 
     if (@available(macOS 11.0, *)) {
         // Resume the synchronizer to continue playback
-        synchronizer.rate = 1.0;
+        [synchronizer setRate:1.0];
         [self logMessage:@"[AVF] Resumed audio playback"];
     }
     _isPaused = false;
@@ -354,8 +335,15 @@
         CMSampleBufferRef sampleBuffer = NULL;
         OSStatus status;
 
-        size_t sampleSize = sizeof(decltype(audioData)::value_type) * channels;
+        size_t bytesPerFrame = sizeof(decltype(audioData)::value_type) * channels;
         size_t dataSize = sizeof(decltype(audioData)::value_type) * audioData.size();
+
+        // Validate data size matches expected frame count
+        size_t expectedDataSize = bytesPerFrame * frameCount;
+        if (dataSize != expectedDataSize) {
+            [self logMessage:@"[AVF] Data size mismatch: expected %zu, got %zu", expectedDataSize, dataSize];
+            return 0;
+        }
 
         // Allocate memory using CFAllocator
         void *data = CFAllocatorAllocate(kCFAllocatorDefault, dataSize, 0);
@@ -383,24 +371,35 @@
             return 0;
         }
 
-        // Calculate timing info with relative timestamps
-        CMTime frameDuration = CMTimeMake(frameCount, sampleRate);
-        CMTime currentPresentationTime;
+        // Calculate frame duration for timing info
+        CMTime nextDuration = CMTimeMake(frameCount, sampleRate);
 
-        // Get and update timestamp atomically
+        // Calculate presentation time using simple accumulation
+        CMTime presentationTime;
         {
             std::lock_guard<std::mutex> lock(timestampMutex);
-            currentPresentationTime = nextPresentationTime;
-            nextPresentationTime = CMTimeAdd(nextPresentationTime, frameDuration);
-            // Update last buffer timestamp for latency calculation
-            lastBufferPresentationTime = currentPresentationTime;
+            presentationTime = currentPresentationTime;
+            currentPresentationTime = CMTimeAdd(currentPresentationTime, nextDuration);
         }
-
-        // Use kCMTimeInvalid for timing info to let AVFoundation handle timing automatically
-        CMSampleTimingInfo sampleTimingInfo = {
-            .duration = frameDuration, .presentationTimeStamp = kCMTimeInvalid, .decodeTimeStamp = kCMTimeInvalid};
-
-        size_t sampleSizeArray[] = {sampleSize};
+/*
+        static uint32_t callCount = 0;
+        [self
+            logMessage:
+                @"[AVF] Creating buffer[%u]: %zu frames, %u channels, %u Hz, %.6f sec, %.6f presentation, %zu bytes/frame, %zu total bytes",
+                callCount++,
+                frameCount,
+                channels,
+                sampleRate,
+                CMTimeGetSeconds(nextDuration),
+                CMTimeGetSeconds(presentationTime),
+                bytesPerFrame,
+                dataSize];
+*/
+        CMSampleTimingInfo sampleTimingInfo[] = {
+            (CMSampleTimingInfo){
+                                 .duration = CMTimeMake(1, sampleRate), .presentationTimeStamp = presentationTime, .decodeTimeStamp = kCMTimeInvalid}
+        };
+        size_t sampleSizeArray[] = {bytesPerFrame};
 
         // Create sample buffer
         status = CMSampleBufferCreateReady(kCFAllocatorDefault,
@@ -408,7 +407,7 @@
                                            currentFormat.formatDescription,
                                            frameCount,
                                            1,
-                                           &sampleTimingInfo,
+                                           sampleTimingInfo,
                                            1,
                                            sampleSizeArray,
                                            &sampleBuffer);
@@ -443,11 +442,20 @@
 
     if (@available(macOS 11.0, *)) {
 
+        // Clear sample queue
+        {
+            std::lock_guard<std::mutex> lock(sampleQueueMutex);
+            while (!sampleQueue.empty()) {
+                CMSampleBufferRef buffer = sampleQueue.front();
+                sampleQueue.pop();
+                CFRelease(buffer);
+            }
+        }
+
         // Reset timestamp for next audio data
         {
             std::lock_guard<std::mutex> lock(timestampMutex);
-            nextPresentationTime = kCMTimeZero;
-            lastBufferPresentationTime = kCMTimeInvalid;
+            currentPresentationTime = kCMTimeZero;
         }
 
         // Flush AVFoundation renderer
@@ -478,20 +486,8 @@
     if (!_isEnabled || !currentFormat) {
         return 0.01;
     }
-
-    // Calculate latency based on the number of buffers in the queue
-    double queueLatency = 0.0;
-    {
-        std::lock_guard<std::mutex> lock(sampleQueueMutex);
-        // Estimate latency based on queue size and typical buffer duration
-        // Assume each buffer is about 10-20ms worth of audio
-        queueLatency = sampleQueue.size() * 0.015; // 15ms per buffer estimate
-    }
-
-    // Add a small constant for AVFoundation's internal buffering
-    double totalLatency = queueLatency + 0.01;
-
-    return totalLatency;
+    // TODO: Implement me
+    return 0.02;
 }
 
 - (bool)isReadyForMoreMediaData {
@@ -575,6 +571,11 @@ namespace foo_out_avf
     void AVFEngine::disable() {
         AVFEngineImpl *impl = (__bridge AVFEngineImpl *)impl_;
         [impl disable];
+    }
+
+    void AVFEngine::setQueueSize(uint32_t size) {
+        AVFEngineImpl *impl = (__bridge AVFEngineImpl *)impl_;
+        [impl setQueueSize:size];
     }
 
     bool AVFEngine::isEnabled() const {

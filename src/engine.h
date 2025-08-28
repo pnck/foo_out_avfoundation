@@ -85,6 +85,8 @@ namespace foo_out_avf
         void resume();
 
         // Buffer configuration
+        void setQueueSize(uint32_t size);
+        
         // Audio interface status management
         bool enable();
         void disable();

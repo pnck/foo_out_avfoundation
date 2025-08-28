@@ -32,5 +32,8 @@ namespace utils
             dst[i] = (float)src[i];
         }
     }
+    void neon_convert(const float *input, float *output, size_t count) {
+        memcpy(output, input, count * sizeof(float));
+    }
 #endif
 } // namespace utils

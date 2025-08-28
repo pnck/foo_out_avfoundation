@@ -91,6 +91,7 @@ namespace foo_out_avf
         AVFOutput(const GUID &p_device, double p_buffer_length, bool p_dither, t_uint32 p_bitdepth) : is_active(false), is_paused(false) {
 
             engine.setLogCallback([](const char *message) { FB2K_console_print(message); });
+            engine.setQueueSize(3);
 
             if (engine.enable()) {
                 is_active = true;
@@ -151,7 +152,6 @@ namespace foo_out_avf
 #endif
 
             size_t processed_samples = engine.feedAudioData(std::move(float_data), sample_rate, channels, sample_count);
-
             return processed_samples;
         }
 
