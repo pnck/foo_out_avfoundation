@@ -13,11 +13,13 @@ on:
 jobs:
   build-macos:
     name: Build
+    # macos-latest is an Apple-silicon runner, which matches the arm64-only build
+    # (macOS Spatial Audio is Apple-silicon only, so no Intel slice is produced).
     runs-on: macos-latest
     strategy:
       fail-fast: false
       matrix:
-        config: [Release, Debug]
+        config: [Debug, Release]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -26,83 +28,42 @@ jobs:
           fetch-tags: true
           fetch-depth: 0
 
-      - name: Setup Xcode
-        run: |
-          sudo xcode-select --switch /Applications/Xcode.app
-          xcodebuild -version
+      # Command Line Tools ship clang + the macOS SDK; Xcode.app is not required.
+      # Ninja makes the CMake build fast and fully IDE-free.
+      - name: Install Ninja
+        run: brew install ninja
 
-      - name: Versioning
+      - name: Derive version
+        id: ver
         run: |
-          TAG=$(git describe --long --all)
-          VERSION=${TAG:6} 
-          echo "" >> src/predef.h
-          echo "#define CURRENT_VERSION $VERSION" >> src/predef.h
-          echo "----------------------------"
-          cat src/predef.h
-        shell: bash
-
-      - name: List Xcode schemes
-        run: |
-          if [ -f "foo_out_avfoundation.xcworkspace/contents.xcworkspacedata" ]; then
-            xcodebuild -list -workspace foo_out_avfoundation.xcworkspace
-          else
-            xcodebuild -list -project foo_out_avfoundation.xcodeproj
-          fi
-
-      - name: Build component (Debug)
-        if: matrix.config == 'Debug'
-        run: |
-          if [ -f "foo_out_avfoundation.xcworkspace/contents.xcworkspacedata" ]; then
-            xcodebuild clean build \
-              -workspace foo_out_avfoundation.xcworkspace \
-              -scheme foo_out_avfoundation \
-              -configuration ${{ matrix.config }} \
-              -sdk macosx \
-              CODE_SIGN_IDENTITY="" \
-              CODE_SIGNING_REQUIRED=NO \
-              CODE_SIGNING_ALLOWED=NO \
-              DEVELOPMENT_TEAM=""
-          else
-            xcodebuild clean build \
-              -project foo_out_avfoundation.xcodeproj \
-              -target foo_out_avfoundation \
-              -configuration ${{ matrix.config }} \
-              -sdk macosx \
-              CODE_SIGN_IDENTITY="" \
-              CODE_SIGNING_REQUIRED=NO \
-              CODE_SIGNING_ALLOWED=NO \
-              DEVELOPMENT_TEAM=""
-          fi
+          TAG=$(git describe --long --all 2>/dev/null || echo "0.0.1")
+          VERSION=${TAG:6}
+          [ -z "$VERSION" ] && VERSION=0.0.1
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Resolved version: $VERSION"
 
       - name: Import Certificate
         if: matrix.config == 'Release'
-        uses: apple-actions/import-codesign-certs@v1
+        uses: apple-actions/import-codesign-certs@v3
         with:
           p12-file-base64: ${{ secrets.CERTIFICATES_P12_B64 }}
           p12-password: ${{ secrets.CERTIFICATES_P12_PASSWORD }}
 
-      - name: Build component (Release)
-        if: matrix.config == 'Release'
+      - name: Configure
         run: |
-          if [ -f "foo_out_avfoundation.xcworkspace/contents.xcworkspacedata" ]; then
-            xcodebuild clean build \
-              -workspace foo_out_avfoundation.xcworkspace \
-              -scheme foo_out_avfoundation \
-              -configuration ${{ matrix.config }} \
-              -sdk macosx \
-              CODE_SIGN_IDENTITY="-" \
-              DEVELOPMENT_TEAM="${{ secrets.TEAM_ID }}" \
-              -allowProvisioningUpdates
+          # Release -> sign with the imported identity; Debug -> ad-hoc ("-").
+          if [ "${{ matrix.config }}" = "Release" ]; then
+            SIGN_ID="${{ secrets.TEAM_ID }}"
           else
-            xcodebuild clean build \
-              -project foo_out_avfoundation.xcodeproj \
-              -target foo_out_avfoundation \
-              -configuration ${{ matrix.config }} \
-              -sdk macosx \
-              CODE_SIGN_IDENTITY="-" \
-              DEVELOPMENT_TEAM="${{ secrets.TEAM_ID }}" \
-              -allowProvisioningUpdates
+            SIGN_ID="-"
           fi
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=${{ matrix.config }} \
+            -DFB2K_VERSION="${{ steps.ver.outputs.version }}" \
+            -DCODESIGN_IDENTITY="$SIGN_ID"
+
+      - name: Build
+        run: cmake --build build --parallel
 
       - name: Upload Artifacts
         uses: actions/upload-artifact@v4

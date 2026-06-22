@@ -342,3 +342,16 @@ dist/
 
 # tests
 venv/
+
+# CMake
+/build/
+/build-*/
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+
+# macOS
+.DS_Store
+
+# Local dev-container compose (host-specific proxy settings)
+/claude-code.yml

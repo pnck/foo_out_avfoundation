@@ -14,9 +14,34 @@
 #include <semaphore>
 #include <vector>
 #include <span>
+#include <chrono>
+#include <mutex>
 
 // Debug configuration - uncomment to enable audio dump
 // #define ENABLE_AUDIO_DUMP 1
+
+namespace
+{
+    // foobar2000 calls output methods on its (single) playback thread and requires
+    // them to return immediately (output.h: "SHOULD NOT block"). The diagnostics here
+    // capture the timing of those callbacks so an intermittent "source is stalling"
+    // can be correlated with either a blocking call or an inter-callback gap.
+
+    // (1) Per-call duration probe: flags a callback whose own body runs too long.
+    struct CallTimerHelper {
+        const char *name;
+        std::chrono::steady_clock::time_point t0;
+        constexpr static double ms_too_long = 30.0; // Threshold for "too long" (in milliseconds)
+        explicit CallTimerHelper(const char *n) : name(n), t0(std::chrono::steady_clock::now()) {}
+        ~CallTimerHelper() {
+            const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+            if (ms > ms_too_long) {
+                FB2K_console_print("[AVF] SLOW callback ", name, ": ", (int)ms, " ms (blocked playback thread)");
+            }
+        }
+    };
+
+}
 
 namespace foo_out_avf
 {
@@ -91,7 +116,9 @@ namespace foo_out_avf
         AVFOutput(const GUID &p_device, double p_buffer_length, bool p_dither, t_uint32 p_bitdepth) : is_active(false), is_paused(false) {
 
             engine.setLogCallback([](const char *message) { FB2K_console_print(message); });
-            engine.setQueueSize(3);
+            // Keep foobar's configured buffer length worth of audio enqueued in the renderer
+            // (the steady-state lead). Too small a lead underruns AVF between refills.
+            engine.setBufferLength(p_buffer_length);
 
             if (engine.enable()) {
                 is_active = true;
@@ -113,7 +140,18 @@ namespace foo_out_avf
     public:
         //! NOTE:  format => f64le,packed
         size_t process_samples_v2(const audio_chunk &p_chunk) override {
-            if (!is_active || is_paused) {
+            CallTimerHelper _t("process_samples");
+            if (!is_active) {
+                return 0;
+            }
+            // Diagnostic: does foobar2000 actually push samples while we're paused?
+            // If so, returning 0 here drops them (the "hard cut" hypothesis).
+            if (is_paused) {
+                static size_t paused_calls = 0;
+                if ((paused_calls++ % 20) == 0) {
+                    FB2K_console_print("[AVF] process_samples_v2 called while paused (", p_chunk.get_sample_count(),
+                                       " samples, count=", paused_calls, ") -> returning 0");
+                }
                 return 0;
             }
 
@@ -155,42 +193,64 @@ namespace foo_out_avf
             return processed_samples;
         }
 
-        bool is_progressing() override { return engine.isEnabled() && !engine.isPaused(); }
+        // Maps to the engine's clock state. False during the priming phase (data queued but
+        // not yet playing) is expected per output.h and must not be read as a stall.
+        bool is_progressing() override { return engine.isProgressing(); }
 
         double get_latency() override {
-            if (is_active && !is_paused) {
-                // Return actual calculated latency based on pending buffers
-                return engine.getCurrentLatency();
-            } else {
-                // Return minimal latency when not active
-                return 0.01; // 10ms
-            }
+            CallTimerHelper _t("get_latency");
+            // Our queued seconds (lead ahead of the play head), decoupled from foobar's decode
+            // position. During pause this is the frozen queued amount, which is still correct.
+            return is_active ? engine.getCurrentLatency() : 0.0;
         }
 
         void process_samples(const audio_chunk &p_chunk) override { process_samples_v2(p_chunk); }
 
-        void update(bool &p_ready) override { p_ready = engine.isEnabled() && engine.isReadyForMoreMediaData(); }
+        void update(bool &p_ready) override {
+            CallTimerHelper _t("update");
+            // We are a shallow sink: ready iff there's room under the target lead.
+            p_ready = is_active && engine.canAcceptMore();
+        }
+
+        //! Advisory count of samples we can take right now (0 == not ready). Lets foobar
+        //! offer a right-sized chunk instead of over-offering and getting a partial take.
+        size_t update_v2() override {
+            CallTimerHelper _t("update_v2");
+            return is_active ? engine.freeSampleCount() : 0;
+        }
 
         void pause(bool p_state) override {
+            CallTimerHelper _t("pause");
             is_paused = p_state;
             if (p_state) {
-                // Pause the engine (clears queue but keeps semaphore)
+                // Freeze the clock; enqueued audio is kept for resume.
                 engine.pause();
             } else {
-                // Resume the engine
                 engine.resume();
             }
         }
 
-        void flush() override { engine.flush(); }
-
-        void force_play() override {
-            is_paused = false;
-            engine.disable();
-            engine.enable();
+        void flush() override {
+            CallTimerHelper _t("flush");
+            engine.flush();
         }
 
-        void volume_set(double p_val) override { engine.setVolume(static_cast<float>(p_val)); }
+        void force_play() override {
+            // Called when there's no more data to send: start the clock even if we
+            // never reached the pre-roll threshold (e.g. a track shorter than the
+            // pre-roll), so the queued tail actually plays out. We must NOT tear the
+            // engine down here — the old disable()/enable() pair flushed the queue
+            // and truncated the end of every track.
+            CallTimerHelper _t("force_play");
+            engine.forcePlay();
+        }
+
+        void volume_set(double p_val) override {
+            // Pass foobar2000's value straight through to the renderer's linear gain —
+            // linear to linear, no curve/dB conversion. We don't assume how foobar maps
+            // its slider; whatever value it sends is applied verbatim.
+            engine.setVolume(static_cast<float>(p_val));
+        }
     };
 
 } // namespace foo_out_avf
