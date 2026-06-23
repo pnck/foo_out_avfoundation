@@ -1,9 +1,15 @@
 # Enjoy Awesome Spatialized Music in foobar2000
 ![screenshot](/docs/screenshot-control_center.png)
 
-A macOS output component for foobar2000 that renders playback through AVFoundation's
-`AVSampleBufferAudioRenderer`, letting your music tap into macOS Spatial Audio —
-spatialized stereo and head tracking, controlled from the system Control Center.
+A macOS output component for foobar2000 that renders playback through AVFoundation, with two
+spatial modes you pick from its preferences:
+
+- **System Spatial Audio** — routes through `AVSampleBufferAudioRenderer` so your music taps
+  into macOS Spatial Audio: spatialized stereo and dynamic head tracking, controlled from the
+  system Control Center.
+- **Virtual 3D** — place yourself anywhere in a custom virtual sound field, DAW-panner style,
+  rendered in-process with Apple's high-quality HRTF (`HRTFHQ`). Set your listening position
+  from a 3D panner in the component's preferences page.
 
 > - mostly done by AI agents  
 > - mostly inspired by [mpv](https://github.com/mpv-player/mpv/blob/master/audio/out/ao_avfoundation.m)
@@ -30,4 +36,5 @@ Working on the engine internals? The output-pipeline contract and design notes l
 ## bugs & todo
 
 - [ ] `source is stalling` shown on stop (matches CoreAudio output; treated as benign for now)
-- [ ] custom virtual space configuration & UI
+- [ ] Virtual 3D mode: positional engine (`AVAudioEngine` + `AVAudioEnvironmentNode`, `HRTFHQ`)
+      and the preferences panner UI (in progress)

@@ -9,6 +9,7 @@
 #include "common/consts.hpp"
 #include "common/utils.hpp"
 #include "engine.h"
+#include "v3d_config.h"
 #include <vector>
 #include <span>
 #include <chrono>
@@ -70,6 +71,9 @@ namespace foo_out_avf
             // thread-safe but dispatches to its receivers synchronously (UI marshaling), which
             // can stall that thread and glitch playback. Hand the line to the main thread via
             // fb2k::inMainThread() — it queues and returns immediately (SDK threadsLite.h).
+            // Pick the spatialization backend (system Spatial Audio vs V3D) from saved config
+            // BEFORE configuring it — setMode recreates the backend, so do it first.
+            engine.setMode(v3d_config::mode());
             engine.setLogCallback([](const char *message) {
                 fb2k::inMainThread([line = std::string(message)]() { FB2K_console_print(line.c_str()); });
             });

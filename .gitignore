@@ -357,3 +357,6 @@ cmake_install.cmake
 
 # Local dev-container compose (host-specific proxy settings)
 /claude-code.yml
+
+# Local planning / tracking notes — never committed
+/tracking/

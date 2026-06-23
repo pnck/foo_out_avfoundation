@@ -3,6 +3,33 @@
 Working notes for anyone (human or AI) touching the audio engine. Not user-facing; see
 `README.md` for the project overview, and `AGENTS.md` for the hard rules.
 
+## File layout
+
+The engine is split so the C++ facade stays one stable abstraction while AVFoundation backends sit
+beside each other, selected at runtime by `OutputMode`:
+
+- **`engine.h`** — public surface: the `AVFOutputBackend` Objective-C protocol (the backend method
+  surface), the concrete `@interface`s, and the C++ `foo_out_avf::AVFEngine` (opaque `impl_`) the
+  component calls.
+- **`engine.mm`** — the C++ facade: forwards each `AVFEngine` call to its `id<AVFOutputBackend>`, and
+  is the one place `OutputMode` picks the concrete backend.
+- **`engine_sys_spatialized.mm`** (`AVFSysSpatializedBackend`) — the default backend: `AVSampleBufferAudioRenderer`
+  + `AVSampleBufferRenderSynchronizer`, the system Spatial Audio path (Control Center, head tracking).
+  Everything below in this memo describes this backend.
+- **`engine_virtual_3d.h` / `.mm`** (`AVFVirtual3DBackend`) — the V3D backend: `AVAudioEngine` +
+  `AVAudioPlayerNode` + `AVAudioEnvironmentNode`, rendering in-process with `HRTFHQ` for custom source
+  placement (the system spatializer offers no per-source position). Currently a scaffold; the feed
+  path is TODO — switch to an `AVAudioSourceNode` pull, the same shallow-sink model as the default.
+- **`v3d_config.h` / `.cpp`** — configStore-backed settings (output mode + source position/size/spread);
+  **`v3d_config_bridge.h` / `.mm`** is its `V3DConfig` Objective-C face for the Swift UI.
+- **preferences UI** — Swift: `preferences_view_controller.swift` (the page), `panner_pad_view.swift`
+  (the dual 2D pads), `scene_view.swift` (read-only SceneKit preview). `preferences_page.mm` registers
+  the fb2k `preferences_page` and instantiates the Swift controller; `bridging_header.h` exposes the
+  ObjC bridge to Swift.
+
+CMake globs `src/*.{cpp,mm}` and `src/*.swift` into the one module (Swift enabled unconditionally),
+so new files need no build-system change.
+
 ## How it works — the output pipeline contract
 
 This was the hard part, and getting it wrong caused every early bug (startup stall,
@@ -42,15 +69,15 @@ no built-in "accumulate, then play" gate.
 1. **How deep the lead should be.** We must *not* forward everything eagerly (that makes the
    renderer the deep buffer, sinking audio into its opaque queue), but the lead must still be
    **deep enough that the gaps between foobar's refill calls don't underrun the renderer** —
-   too small a lead is what caused the crackle/stutter. **Fix:** keep a lead equal to
-   foobar's configured buffer length (`_targetLeadSeconds`, from `p_buffer_length`) and
-   report partial consumption. foobar's buffer length *is* the intended output latency, so
-   filling exactly that much both avoids underruns and keeps foobar's pacing happy.
+   too small a lead is what caused the crackle/stutter. **Fix:** keep a lead of `targetLead`
+   (= `max(p_buffer_length, device floor)`) and report partial consumption. foobar's buffer
+   length *is* the intended output latency, so filling that much avoids underruns and keeps
+   foobar's pacing happy; the device floor guarantees a safe minimum on high-latency routes.
 2. **Startup priming.** foobar buffers-then-plays; AVF plays immediately on `setRate:1`, so a
    tiny first buffer underran instantly → `get_latency` hit ~0 → `source is stalling`.
-   **Fix:** the clock stays at rate 0 until we've banked `_primeSeconds` (a *small* threshold,
+   **Fix:** the clock stays at rate 0 until we've banked `primeLead` (a *small* threshold,
    so startup stays snappy), *then* `setRate:1`; we keep filling up to the full
-   `_targetLeadSeconds` while already playing. `is_progressing()` reports the real clock
+   `targetLead` while already playing. `is_progressing()` reports the real clock
    state; `force_play()` starts early.
 3. **Partial consumption.** Because we take only what fits and return the count, foobar holds
    the rest and **the engine needs no staging queue / second thread of its own** — it is a
@@ -59,18 +86,26 @@ no built-in "accumulate, then play" gate.
 
 ### Engine state (the whole model)
 
-- `_targetLeadSeconds` — steady-state lead, set from foobar's `p_buffer_length`. This is how
-  much we keep enqueued in the renderer; sizing it to the configured buffer is what stops the
-  underrun crackle.
-- `_primeSeconds` — the smaller "start playing" threshold (`min(buffer, 0.2 s)`): bank this,
-  start the clock, then keep filling to `_targetLeadSeconds`.
+- `targetLead` — steady-state lead = `max(_configured, _deviceFloor)`. `_configured` is foobar's
+  `p_buffer_length` (0 if unset); `_deviceFloor` is a transport-type floor for the current output
+  device — built-in/wired 200 ms, wireless (Bluetooth / BluetoothLE / AirPlay) 500 ms — queried from
+  the CoreAudio HAL and refreshed on the default-output-device-changed notification, so it follows
+  speakers ↔ AirPods switches. Sizing the lead to this is what stops the underrun crackle.
+- `primeLead` — the smaller "start playing" threshold = `min(targetLead / 2, kPrime)` (kPrime =
+  200 ms): bank this, start the clock, then keep filling to `targetLead`. Must stay *below* target,
+  or the instant the clock starts we'd report "full", foobar would stop feeding, and the renderer
+  would drain the whole lead before the next poll (immediate underrun).
 - `_presentationTime` — PTS accumulator (end of everything enqueued); next buffer starts
   here. Reset to 0 (with the synchronizer clock) at `enable`/`flush`. Each buffer's actual PTS
   is `max(_presentationTime, currentTime)` so an underrun never places a buffer in the past
   (which would trigger AVFoundation's `Resyncing AQ timeline` + `AudioQueueFlush` cascade).
-- `_primed` — false until `_primeSeconds` is banked, then the clock runs.
+- `_primed` — false until `primeLead` is banked, then the clock runs.
+- `kMinFeed` (20 ms) — minimum room that must open before we accept another batch, so we never
+  dribble ~1-sample `CMSampleBuffer`s (which thrash the AudioQueue regardless of buffer size).
+- All time-valued state is `std::chrono::duration<double>` (`fsec`); conversions to/from foobar's
+  double seconds, `CMTime` and frame counts happen at exactly one named boundary each.
 - Lead at any moment = `_presentationTime − synchronizer.currentTime`; that is both
-  `get_latency()` and the gate for "can we take more" (`lead < _targetLeadSeconds`).
+  `get_latency()` and the gate for "can we take more" (`lead < targetLead`).
 
 ## Design history: from the original engine to now
 
@@ -93,7 +128,7 @@ buffer foobar couldn't see, and no clean clock to anchor Spatial Audio against.
   exposes Spatial Audio (`allowedAudioSpatializationFormats`) and gives an explicit playback
   clock to time buffers against.
 - **Model:** a **shallow sink**. foobar is the deep buffer; we keep a small lead
-  (`_targetLeadSeconds`), honour partial consumption (`process_samples_v2` returns the count
+  (`targetLead`), honour partial consumption (`process_samples_v2` returns the count
   taken), **prime** before starting the clock, feed in **batches** (never 1-sample dribbles),
   and anchor every PTS to the clock (`max(_presentationTime, currentTime)`).
 - **Threading:** every method runs on foobar's single playback thread. No staging queue, no
