@@ -18,7 +18,7 @@
 cmake_minimum_required(VERSION 3.24)
 
 project(foo_out_avfoundation
-    VERSION 0.1.0
+    VERSION 0.1.1
     LANGUAGES C CXX OBJC OBJCXX)
 
 if(NOT APPLE)
@@ -50,10 +50,35 @@ add_compile_definitions($<$<CONFIG:Debug>:_DEBUG> $<$<CONFIG:Debug>:DEBUG>)
 # "" to skip signing entirely.
 set(CODESIGN_IDENTITY "-" CACHE STRING "codesign identity ('-' = ad-hoc, '' = none)")
 
-# Free-form version string shown in the About box (main.cpp's CURRENT_VERSION).
-# CI passes the `git describe` output here; the numeric PROJECT_VERSION above is
-# kept separate because it feeds the Info.plist which requires x.y.z.
-set(FB2K_VERSION "${PROJECT_VERSION}" CACHE STRING "About-box version string")
+# Component version string for DECLARE_COMPONENT_VERSION (main.cpp's CURRENT_VERSION). Derived
+# from git, differing by build type:
+#   Debug   -> <project-version>-g<short-hash>[-dirty]   (a dev build, traceable to commit + state)
+#   Release -> <project-version>                          (the clean tag version)
+# CI / packagers can force an exact string with -DFB2K_VERSION_OVERRIDE=... The numeric
+# PROJECT_VERSION above stays separate because it feeds the Info.plist (which requires x.y.z).
+# Recomputed every configure (never cached) so the hash / dirty flag can't go stale.
+unset(FB2K_VERSION CACHE) # drop any value cached by older revisions of this file
+if(FB2K_VERSION_OVERRIDE)
+    set(FB2K_VERSION "${FB2K_VERSION_OVERRIDE}")
+else()
+    set(FB2K_VERSION "${PROJECT_VERSION}")
+    find_package(Git QUIET)
+    if(GIT_FOUND AND CMAKE_BUILD_TYPE STREQUAL "Debug")
+        execute_process(COMMAND "${GIT_EXECUTABLE}" rev-parse --short HEAD
+            WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+            OUTPUT_VARIABLE _git_hash OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+        execute_process(COMMAND "${GIT_EXECUTABLE}" status --porcelain --untracked-files=no
+            WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+            OUTPUT_VARIABLE _git_dirty OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+        if(_git_hash)
+            set(FB2K_VERSION "${PROJECT_VERSION}-${_git_hash}")
+            if(_git_dirty)
+                string(APPEND FB2K_VERSION "-dirty")
+            endif()
+        endif()
+    endif()
+endif()
+message(STATUS "Component version: ${FB2K_VERSION}")
 
 # ---------------------------------------------------------------------------
 # foobar2000 SDK (vendored as a git submodule under vendor/sdk).
@@ -92,25 +117,9 @@ function(fb2k_sdk_lib name std prefix_header)
 endfunction()
 
 # --- pfc -------------------------------------------------------------------
-add_library(pfc STATIC
-    ${SDK}/pfc/SmartStrStr.cpp        ${SDK}/pfc/audio_math.cpp
-    ${SDK}/pfc/audio_sample.cpp       ${SDK}/pfc/base64.cpp
-    ${SDK}/pfc/bigmem.cpp             ${SDK}/pfc/bit_array.cpp
-    ${SDK}/pfc/bsearch.cpp            ${SDK}/pfc/charDownConvert.cpp
-    ${SDK}/pfc/cpuid.cpp              ${SDK}/pfc/crashWithMessage.cpp
-    ${SDK}/pfc/filehandle.cpp         ${SDK}/pfc/filetimetools.cpp
-    ${SDK}/pfc/guid.cpp               ${SDK}/pfc/nix-objects.cpp
-    ${SDK}/pfc/obj-c.mm               ${SDK}/pfc/other.cpp
-    ${SDK}/pfc/pathUtils.cpp          ${SDK}/pfc/pfc-fb2k-hooks.cpp
-    ${SDK}/pfc/printf.cpp             ${SDK}/pfc/selftest.cpp
-    ${SDK}/pfc/sort.cpp               ${SDK}/pfc/splitString2.cpp
-    ${SDK}/pfc/stdafx.cpp             ${SDK}/pfc/string-compare.cpp
-    ${SDK}/pfc/string-conv-lite.cpp   ${SDK}/pfc/string-lite.cpp
-    ${SDK}/pfc/string_base.cpp        ${SDK}/pfc/string_conv.cpp
-    ${SDK}/pfc/synchro_nix.cpp        ${SDK}/pfc/threads.cpp
-    ${SDK}/pfc/timers.cpp             ${SDK}/pfc/unicode-normalize.cpp
-    ${SDK}/pfc/utf8.cpp               ${SDK}/pfc/wildcard.cpp
-    ${SDK}/pfc/win-objects.cpp)
+# Whole directory: pfc's win-*/nix-* files self-gate with #ifdef, so all compile.
+file(GLOB PFC_SOURCES CONFIGURE_DEPENDS "${SDK}/pfc/*.cpp" "${SDK}/pfc/*.mm")
+add_library(pfc STATIC ${PFC_SOURCES})
 fb2k_sdk_lib(pfc 17 "${SDK}/pfc/pfc-lite.h")
 
 # --- foobar2000_SDK --------------------------------------------------------
@@ -121,43 +130,16 @@ fb2k_sdk_lib(foobar2000_SDK 17 "${SDK}/foobar2000/SDK/foobar2000-sdk-pch.h")
 target_link_libraries(foobar2000_SDK PRIVATE pfc)
 
 # --- foobar2000_SDK_helpers ------------------------------------------------
-# NOT a glob: the helpers/ directory also contains Win32/UI-only sources
-# (DarkMode.cpp, win32_dialog.cpp, image_load_save.cpp, ...) that are excluded
-# from the SDK's Apple Sources build phase and do not compile on macOS.
-add_library(foobar2000_SDK_helpers STATIC
-    ${SDK}/foobar2000/helpers/StdAfx.cpp
-    ${SDK}/foobar2000/helpers/ThreadUtils.cpp
-    ${SDK}/foobar2000/helpers/VisUtils.cpp
-    ${SDK}/foobar2000/helpers/VolumeMap.cpp
-    ${SDK}/foobar2000/helpers/album_art_helpers.cpp
-    ${SDK}/foobar2000/helpers/cfg_guidlist.cpp
-    ${SDK}/foobar2000/helpers/cfg_var_import.cpp
-    ${SDK}/foobar2000/helpers/create_directory_helper.cpp
-    ${SDK}/foobar2000/helpers/cue_creator.cpp
-    ${SDK}/foobar2000/helpers/cue_parser.cpp
-    ${SDK}/foobar2000/helpers/cue_parser_embedding.cpp
-    ${SDK}/foobar2000/helpers/cuesheet_index_list.cpp
-    ${SDK}/foobar2000/helpers/dialog_resize_helper.cpp
-    ${SDK}/foobar2000/helpers/dropdown_helper.cpp
-    ${SDK}/foobar2000/helpers/dynamic_bitrate_helper.cpp
-    ${SDK}/foobar2000/helpers/file_list_helper.cpp
-    ${SDK}/foobar2000/helpers/file_move_helper.cpp
-    ${SDK}/foobar2000/helpers/file_win32_wrapper.cpp
-    ${SDK}/foobar2000/helpers/filetimetools.cpp
-    ${SDK}/foobar2000/helpers/input_helper_cue.cpp
-    ${SDK}/foobar2000/helpers/input_helpers.cpp
-    ${SDK}/foobar2000/helpers/mp3_utils.cpp
-    ${SDK}/foobar2000/helpers/packet_decoder_aac_common.cpp
-    ${SDK}/foobar2000/helpers/packet_decoder_mp3_common.cpp
-    ${SDK}/foobar2000/helpers/readers.cpp
-    ${SDK}/foobar2000/helpers/seekabilizer.cpp
-    ${SDK}/foobar2000/helpers/stream_buffer_helper.cpp
-    ${SDK}/foobar2000/helpers/text_file_loader.cpp
-    ${SDK}/foobar2000/helpers/text_file_loader_v2.cpp
-    ${SDK}/foobar2000/helpers/track_property_callback_impl.cpp
-    ${SDK}/foobar2000/helpers/win-systemtime.cpp
-    ${SDK}/foobar2000/helpers/win32_misc.cpp
-    ${SDK}/foobar2000/helpers/writer_wav.cpp)
+# Glob the directory, then drop the Win32/UI-only sources that aren't in the SDK's
+# Apple Sources build phase (they #include <windows.h> etc. and don't build on macOS).
+# A new cross-platform helper is picked up automatically; a new Windows-only one will
+# fail to compile, flagging that it needs adding to this exclude list. (Note: win-systemtime,
+# win32_misc, file_win32_wrapper DO build on macOS — they self-gate — so they're kept.)
+file(GLOB FB2K_HELPERS_SOURCES CONFIGURE_DEPENDS
+    "${SDK}/foobar2000/helpers/*.cpp" "${SDK}/foobar2000/helpers/*.mm")
+list(FILTER FB2K_HELPERS_SOURCES EXCLUDE REGEX
+    "/(AutoComplete|CTableEditHelper-Legacy|DarkMode|WindowPositionUtils|image_load_save|inplace_edit|ui_element_helpers|win32_dialog|window_placement_helper)\\.cpp$")
+add_library(foobar2000_SDK_helpers STATIC ${FB2K_HELPERS_SOURCES})
 fb2k_sdk_lib(foobar2000_SDK_helpers 17 "${SDK}/foobar2000/helpers/StdAfx.h")
 target_link_libraries(foobar2000_SDK_helpers PRIVATE pfc foobar2000_SDK)
 
@@ -168,12 +150,13 @@ fb2k_sdk_lib(foobar2000_component_client 20 "")
 target_link_libraries(foobar2000_component_client PRIVATE pfc foobar2000_SDK)
 
 # --- shared (built from source on Apple; the .lib files are Windows-only) ---
-add_library(shared STATIC
-    ${SDK}/foobar2000/shared/audio_math.cpp
-    ${SDK}/foobar2000/shared/shared-apple.mm
-    ${SDK}/foobar2000/shared/shared-nix.cpp
-    ${SDK}/foobar2000/shared/stdafx.cpp
-    ${SDK}/foobar2000/shared/utf8.cpp)
+# Same glob-then-exclude pattern: drop the Win32 UI / crash-reporting sources that
+# aren't in the SDK's Apple build (filedialogs, systray, minidump, …).
+file(GLOB SHARED_SOURCES CONFIGURE_DEPENDS
+    "${SDK}/foobar2000/shared/*.cpp" "${SDK}/foobar2000/shared/*.mm")
+list(FILTER SHARED_SOURCES EXCLUDE REGEX
+    "/(Utility|crash_info|filedialogs|filedialogs_vista|font_description|minidump|modal_dialog|systray|text_drawing|utf8api)\\.cpp$")
+add_library(shared STATIC ${SHARED_SOURCES})
 fb2k_sdk_lib(shared 17 "${SDK}/foobar2000/shared/shared.h")
 target_link_libraries(shared PRIVATE pfc)
 

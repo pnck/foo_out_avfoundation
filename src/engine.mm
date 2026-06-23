@@ -17,9 +17,12 @@
 #import "engine.h"
 #import <AVFoundation/AVFoundation.h>
 #import <CoreMedia/CoreMedia.h>
+#import <CoreAudio/CoreAudio.h>
 #include <vector>
 #include <algorithm>
 #include <functional>
+#include <atomic>
+#include <chrono>
 
 // Compatibility macros for different macOS versions' 3D audio API
 #ifndef AVAudio3DPointMake
@@ -29,10 +32,10 @@
     }
 #endif
 
-// Diagnostic logging — the [AVF] feed/underrun/gate/primed traces. Compiled out in Release
-// (NDEBUG); operational logs (enable/disable, errors) stay in every build. The log callback
-// hands these to the main thread (fb2k::inMainThread), so even calls from the realtime feed
-// thread don't block on console I/O. Used only inside instance methods (`self` in scope).
+// THE single logging path for everything [AVF] — traces, enable/disable, errors alike. Expands to
+// a -logMessage call in Debug and to nothing in Release (NDEBUG), so the component is completely
+// silent in Release and the arguments aren't even evaluated (matters on the realtime feed thread).
+// Used inside instance methods (`self` in scope).
 #ifdef NDEBUG
 #define AVF_DIAG(...) ((void)0)
 #else
@@ -41,26 +44,92 @@
 
 namespace
 {
-    // Steady-state lead we keep enqueued in the renderer = foobar2000's configured buffer
-    // length (passed to the output ctor as p_buffer_length). Using the full configured buffer
-    // is the point: too small a lead and the gaps between foobar's refill calls underrun the
-    // renderer → crackle. Until foobar tells us, assume the SDK default (1.0 s).
-    constexpr double kDefaultBufferSeconds = 1.0;
-    // We don't wait for the whole buffer before starting — bank just this much, start the
-    // clock, then keep filling up to the full lead while already playing. Keeps startup snappy
-    // without sacrificing the deep steady-state buffer.
-    constexpr double kPrimeSeconds = 0.2;
-    // Floor on the lead. Must exceed high-latency routes' device latency (AirPods/Bluetooth is
-    // ~160 ms) so that, with setDelaysRateChangeUntilHasSufficientMediaData = YES, the renderer
-    // can buffer enough for the synchronizer to start the clock reliably on those devices.
-    constexpr double kMinBufferSeconds = 0.3;
-    // Minimum batch we accept in one go. Without this we top the lead up one or two SAMPLES at
-    // a time (foobar polls faster than the renderer drains), enqueueing a flood of ~1-sample
+    using namespace std::chrono_literals;
+    // A duration in floating-point seconds — our currency for everything time-valued. Beats a
+    // bare double because the unit is in the type (no "is this seconds or ms?" guessing), and it
+    // converts to/from the SDK boundaries (foobar's double seconds, CMTime, frame counts) with an
+    // explicit, named cast at exactly one place each.
+    using fsec = std::chrono::duration<double>;
+    // Display helper: a duration's value in milliseconds, for the [AVF] log lines.
+    static inline double ms(fsec s) { return std::chrono::duration<double, std::milli>(s).count(); }
+
+    // We don't wait for the whole buffer before starting — bank just this much, start the clock,
+    // then keep filling up to the full lead while playing. Keeps startup snappy without losing the
+    // deep steady-state buffer.
+    constexpr fsec kPrime = 200ms;
+    // Floor on the lead, chosen by the system output device's transport type (queried from the
+    // CoreAudio HAL and refreshed on the default-device-changed notification). Wireless routes
+    // (Bluetooth / AirPlay) have far higher, burstier latency than the built-in DAC, so they need
+    // a deeper lead to avoid underruns; built-in can stay tighter for lower latency.
+    constexpr fsec kBuiltinFloor = 200ms;  // built-in / wired
+    constexpr fsec kWirelessFloor = 500ms; // Bluetooth / AirPlay (also the safe default)
+    // Minimum batch we accept in one go. Without this we top the lead up one or two SAMPLES at a
+    // time (foobar polls faster than the renderer drains), enqueueing a flood of ~1-sample
     // CMSampleBuffers that thrash AVFoundation's AudioQueue timeline ("Resyncing AQ timeline" +
-    // AudioQueueFlush) no matter how big the buffer is — the real cause of the crackle/stall.
-    // Waiting for a whole batch makes every enqueued buffer a sane size.
-    constexpr double kMinFeedSeconds = 0.02;
+    // AudioQueueFlush) no matter how big the buffer is. Waiting for a whole batch keeps buffers sane.
+    constexpr fsec kMinFeed = 20ms;
+
+    // Lead floor for the CURRENT system default output device, by transport type (CoreAudio HAL).
+    // Wireless (Bluetooth / BluetoothLE / AirPlay) → the deeper floor; everything else (built-in,
+    // USB, HDMI, …) → the tighter floor. On any query failure return the wireless (safe) floor.
+    static fsec currentOutputFloor() {
+        AudioObjectID dev = kAudioObjectUnknown;
+        UInt32 size = sizeof(dev);
+        AudioObjectPropertyAddress addr = {
+            kAudioHardwarePropertyDefaultOutputDevice,
+            kAudioObjectPropertyScopeGlobal,
+            kAudioObjectPropertyElementMain,
+        };
+        if (AudioObjectGetPropertyData(kAudioObjectSystemObject, &addr, 0, NULL, &size, &dev) != noErr ||
+            dev == kAudioObjectUnknown) {
+            return kWirelessFloor;
+        }
+        UInt32 transport = 0;
+        size = sizeof(transport);
+        addr.mSelector = kAudioDevicePropertyTransportType;
+        if (AudioObjectGetPropertyData(dev, &addr, 0, NULL, &size, &transport) != noErr) {
+            return kWirelessFloor;
+        }
+        switch (transport) {
+        case kAudioDeviceTransportTypeBluetooth:
+        case kAudioDeviceTransportTypeBluetoothLE:
+        case kAudioDeviceTransportTypeAirPlay:
+            return kWirelessFloor;
+        default:
+            return kBuiltinFloor;
+        }
+    }
+
+    // The CoreAudio property address we observe for output-device changes.
+    AudioObjectPropertyAddress kDefaultOutputDeviceAddr = {
+        kAudioHardwarePropertyDefaultOutputDevice,
+        kAudioObjectPropertyScopeGlobal,
+        kAudioObjectPropertyElementMain,
+    };
 } // namespace
+
+// Forward-declare the private methods used before their definitions (the C listener, and the fsec
+// helpers called from feed/gate above their @implementation point).
+@interface AVFEngineImpl ()
+- (void)updateDeviceFloor;
+- (fsec)lead;
+- (fsec)targetLead;
+- (fsec)primeLead;
+@end
+
+// CoreAudio listener for "default output device changed" — runs on a HAL thread. Re-queries the
+// new device's transport type and updates the (atomic) lead floor. clientData is the engine
+// (unretained; removed in dealloc before it dies).
+static OSStatus avf_default_output_changed(AudioObjectID inObjectID, UInt32 inNumberAddresses,
+                                           const AudioObjectPropertyAddress *inAddresses, void *clientData) {
+    (void)inObjectID;
+    (void)inNumberAddresses;
+    (void)inAddresses;
+    @autoreleasepool {
+        [(__bridge AVFEngineImpl *)clientData updateDeviceFloor];
+    }
+    return noErr;
+}
 
 @implementation AVFEngineImpl {
 
@@ -76,13 +145,16 @@ namespace
     // _presentationTime - synchronizer.currentTime.
     CMTime _presentationTime;
 
-    // Priming gate: false until we've banked _primeSeconds of lead, at which point the clock
-    // starts (setRate:1). Until then the renderer fills silently at rate 0.
+    // Priming gate: false until we've banked the prime threshold of lead, at which point the
+    // clock starts (setRate:1). Until then the renderer fills silently at rate 0.
     bool _primed;
 
-    // Steady-state lead cap (= foobar's buffer length) and the smaller priming threshold.
-    double _targetLeadSeconds;
-    double _primeSeconds;
+    // Steady-state target lead = max(foobar's configured buffer length, device floor). The floor
+    // depends on the current output device's transport type and is updated from a CoreAudio
+    // listener (any thread), so it's atomic; _configured is set once on the playback thread.
+    // See targetLead / primeLead.
+    fsec _configured;
+    std::atomic<fsec> _deviceFloor;
 
     // Diagnostics (see the [AVF] log lines): feed counter, underrun counter, last feed-gate state.
     uint64_t _diagFeed;
@@ -132,8 +204,11 @@ namespace
 
     _presentationTime = kCMTimeZero;
     _primed = false;
-    _targetLeadSeconds = kDefaultBufferSeconds;
-    _primeSeconds = kPrimeSeconds;
+    _configured = fsec(0); // set from fb2k's p_buffer_length in setBufferLength, before enable
+    _deviceFloor.store(currentOutputFloor());
+    // Track the system default output device so the floor follows speakers ↔ AirPods switches.
+    AudioObjectAddPropertyListener(kAudioObjectSystemObject, &kDefaultOutputDeviceAddr,
+                                   avf_default_output_changed, (__bridge void *)self);
     _diagFeed = 0;
     _diagUnderrun = 0;
     _diagWasReady = false;
@@ -146,6 +221,8 @@ namespace
 }
 
 - (void)dealloc {
+    AudioObjectRemovePropertyListener(kAudioObjectSystemObject, &kDefaultOutputDeviceAddr,
+                                      avf_default_output_changed, (__bridge void *)self);
     [self disable];
     if (venv) {
         delete venv;
@@ -155,6 +232,9 @@ namespace
 
 // --- logging ---------------------------------------------------------------
 
+// Debug-only backend for AVF_DIAG (never called in Release — every call site is the macro, which
+// compiles to nothing under NDEBUG). Hands the line to the main thread so feed-thread logging
+// doesn't block on console I/O.
 - (void)logMessage:(NSString *)format, ... {
     va_list args;
     va_start(args, format);
@@ -172,21 +252,34 @@ namespace
     _logCallback = callback;
 }
 
-// foobar2000's configured output buffer length (seconds), from the output constructor. We
-// keep this much enqueued in the renderer in steady state; the priming threshold is the
-// smaller of it and kPrimeSeconds.
+// foobar2000's user-configured output buffer length (a double in seconds from the SDK — converted
+// to fsec here, at the boundary). This is the actual configured value, not an assumed default; the
+// steady-state target is max(this, device floor), so a non-positive value simply lets the device
+// floor decide the minimum. See targetLead.
 - (void)setBufferLength:(double)seconds {
-    _targetLeadSeconds = (seconds > kMinBufferSeconds) ? seconds : kMinBufferSeconds;
-    // Prime to only HALF the target (capped at kPrimeSeconds). The priming threshold MUST be
-    // below the target: if we prime all the way to the target, the instant the clock starts we
-    // already report "full", foobar stops feeding, and the renderer drains the whole lead
-    // before foobar's next poll — starving it right after start (seen in the macOS log as an
-    // immediate underrun + endless resync). Priming below target leaves foobar feeding to top
-    // the lead up, so the renderer stays continuously fed.
-    _primeSeconds = _targetLeadSeconds * 0.5;
-    if (_primeSeconds > kPrimeSeconds) {
-        _primeSeconds = kPrimeSeconds;
-    }
+    _configured = (seconds > 0.0) ? fsec(seconds) : fsec(0);
+}
+
+// Steady-state lead target = the larger of foobar's configured buffer and the current device's
+// transport floor (built-in 200 ms / wireless 500 ms).
+- (fsec)targetLead {
+    return std::max(_configured, _deviceFloor.load());
+}
+
+// Priming threshold: half the target, capped at kPrime. MUST be below the target — if we primed
+// all the way to it, the instant the clock starts we'd report "full", foobar would stop feeding,
+// and the renderer would drain the whole lead before foobar's next poll (immediate underrun +
+// endless resync). Priming below target keeps foobar topping the lead up.
+- (fsec)primeLead {
+    return std::min([self targetLead] / 2.0, kPrime);
+}
+
+// Refresh the lead floor from the current default output device's transport type. Called from the
+// CoreAudio listener (HAL thread) on device changes. Atomic store only.
+- (void)updateDeviceFloor {
+    const fsec floor = currentOutputFloor();
+    _deviceFloor.store(floor);
+    AVF_DIAG(@"[AVF] output device floor -> %.0f ms (target now %.0f ms)", ms(floor), ms([self targetLead]));
 }
 
 // --- format ----------------------------------------------------------------
@@ -217,13 +310,13 @@ namespace
         }
 
         if (!audioFormat) {
-            [self logMessage:@"[AVF] Failed to create AVAudioFormat"];
+            AVF_DIAG(@"[AVF] Failed to create AVAudioFormat");
             return false;
         }
         currentFormat = audioFormat;
         return true;
     }
-    [self logMessage:@"[AVF] Error: AVSampleBufferAudioRenderer not available on this system"];
+    AVF_DIAG(@"[AVF] Error: AVSampleBufferAudioRenderer not available on this system");
     return false;
 }
 
@@ -239,13 +332,14 @@ namespace
     _primed = false;
 }
 
-// Current lead ahead of the play head, in seconds (our queued latency). During priming the
-// clock sits at 0, so this is simply the amount banked so far.
-- (double)leadSeconds {
+// Current lead ahead of the play head (our queued latency). During priming the clock sits at 0,
+// so this is simply the amount banked so far. CMTime is AVFoundation's native time type; we
+// convert it to fsec here, at the boundary.
+- (fsec)lead {
     if (@available(macOS 11.0, *)) {
-        return CMTimeGetSeconds(_presentationTime) - CMTimeGetSeconds([synchronizer currentTime]);
+        return fsec(CMTimeGetSeconds(_presentationTime) - CMTimeGetSeconds([synchronizer currentTime]));
     }
-    return 0.0;
+    return fsec(0);
 }
 
 // --- enable / disable ------------------------------------------------------
@@ -255,7 +349,7 @@ namespace
         return true;
     }
     if (renderer == nil || synchronizer == nil) {
-        [self logMessage:@"[AVF] Error: Missing required components for audio playback"];
+        AVF_DIAG(@"[AVF] Error: Missing required components for audio playback");
         return false;
     }
 
@@ -271,11 +365,11 @@ namespace
         _loggedRenderError = false;
         _isPaused = false;
         _isEnabled = true;
-        [self logMessage:@"[AVF] Audio engine enabled (lead %.0f ms, prime %.0f ms)",
-                         _targetLeadSeconds * 1000.0, _primeSeconds * 1000.0];
+        AVF_DIAG(@"[AVF] Audio engine enabled (lead %.0f ms, prime %.0f ms)",
+                 ms([self targetLead]), ms([self primeLead]));
         return true;
     }
-    [self logMessage:@"[AVF] Error: AVSampleBufferAudioRenderer not available on this system"];
+    AVF_DIAG(@"[AVF] Error: AVSampleBufferAudioRenderer not available on this system");
     return false;
 }
 
@@ -296,7 +390,7 @@ namespace
     }
     _presentationTime = kCMTimeZero;
     _primed = false;
-    [self logMessage:@"[AVF] Audio engine disabled"];
+    AVF_DIAG(@"[AVF] Audio engine disabled");
 }
 
 // --- transport -------------------------------------------------------------
@@ -393,7 +487,7 @@ namespace
             kCFAllocatorDefault, data, dataSize, kCFAllocatorDefault, NULL, 0, dataSize, 0, &blockBuffer);
         if (status != noErr) {
             CFAllocatorDeallocate(kCFAllocatorDefault, data);
-            [self logMessage:@"[AVF] Failed to create block buffer: %d", (int)status];
+            AVF_DIAG(@"[AVF] Failed to create block buffer: %d", (int)status);
             return 0;
         }
 
@@ -414,8 +508,8 @@ namespace
             // underrun (then the snap can't catch up and AVFoundation will resync/flush).
             if ((_diagUnderrun++ % 16) == 0) {
                 AVF_DIAG(@"[AVF] UNDERRUN #%llu pres=%.0fms cur=%.0fms primed=%d (snapping PTS fwd)",
-                         (unsigned long long)_diagUnderrun, CMTimeGetSeconds(_presentationTime) * 1000.0,
-                         CMTimeGetSeconds(cur) * 1000.0, _primed ? 1 : 0);
+                         (unsigned long long)_diagUnderrun, ms(fsec(CMTimeGetSeconds(_presentationTime))),
+                         ms(fsec(CMTimeGetSeconds(cur))), _primed ? 1 : 0);
             }
             pts = cur;
         }
@@ -431,7 +525,7 @@ namespace
                                            (CMItemCount)take, 1, &timing, 1, &sampleSize, &sampleBuffer);
         CFRelease(blockBuffer);
         if (status != noErr || sampleBuffer == NULL) {
-            [self logMessage:@"[AVF] Failed to create sample buffer: %d", (int)status];
+            AVF_DIAG(@"[AVF] Failed to create sample buffer: %d", (int)status);
             return 0;
         }
 
@@ -443,18 +537,18 @@ namespace
         _presentationTime = CMTimeAdd(pts, CMTimeMake((int64_t)take, (int32_t)sampleRate));
 
         // Priming: once the banked lead reaches the (smaller) prime threshold, start the
-        // clock. We keep accepting afterwards up to the full _targetLeadSeconds.
-        if (!_primed && [self leadSeconds] >= _primeSeconds) {
+        // clock. We keep accepting afterwards up to the full target lead.
+        if (!_primed && [self lead] >= [self primeLead]) {
             _primed = true;
             [synchronizer setRate:1.0];
             AVF_DIAG(@"[AVF] primed: clock started at lead=%.0fms (target=%.0fms)",
-                     [self leadSeconds] * 1000.0, _targetLeadSeconds * 1000.0);
+                     ms([self lead]), ms([self targetLead]));
         }
         // DIAGNOSTIC: periodic feed sample — shows take size, the live lead, and whether the
         // accumulator is keeping ahead of the clock during steady state.
         if ((_diagFeed++ % 64) == 0) {
             AVF_DIAG(@"[AVF] feed #%llu take=%zu lead=%.0fms primed=%d",
-                     (unsigned long long)_diagFeed, take, [self leadSeconds] * 1000.0, _primed ? 1 : 0);
+                     (unsigned long long)_diagFeed, take, ms([self lead]), _primed ? 1 : 0);
         }
         return take;
     }
@@ -466,14 +560,14 @@ namespace
     if (sampleRate == 0) {
         return 0;
     }
-    const double freeSec = _targetLeadSeconds - [self leadSeconds];
-    // Batch: don't accept until at least kMinFeedSeconds of room has opened, so we never feed
-    // 1-sample dribbles (see kMinFeedSeconds). The lead then oscillates between
-    // (target - batch) and target, and each feed is a sane chunk.
-    if (freeSec < kMinFeedSeconds) {
+    const fsec freeRoom = [self targetLead] - [self lead];
+    // Batch: don't accept until at least kMinFeed of room has opened, so we never feed 1-sample
+    // dribbles (see kMinFeed). The lead then oscillates between (target - batch) and target, and
+    // each feed is a sane chunk.
+    if (freeRoom < kMinFeed) {
         return 0;
     }
-    return (size_t)(freeSec * (double)sampleRate);
+    return (size_t)(freeRoom.count() * (double)sampleRate); // fsec → frames, at the boundary
 }
 
 // --- backpressure for foobar's update() / update_v2() ----------------------
@@ -482,14 +576,14 @@ namespace
     if (!_isEnabled || _isPaused) {
         return false;
     }
-    const bool ready = [self leadSeconds] < _targetLeadSeconds;
+    const bool ready = [self lead] < [self targetLead];
     // DIAGNOSTIC: log every gate flip. If we go FULL right after priming and foobar then
     // stalls feeding (a long gap before the next READY), that stall is what starves the
     // renderer — independent of buffer size.
     if (ready != _diagWasReady) {
         _diagWasReady = ready;
         AVF_DIAG(@"[AVF] feed-gate -> %s (lead=%.0fms target=%.0fms)", ready ? "READY" : "FULL",
-                 [self leadSeconds] * 1000.0, _targetLeadSeconds * 1000.0);
+                 ms([self lead]), ms([self targetLead]));
     }
     return ready;
 }
@@ -504,7 +598,7 @@ namespace
     if (@available(macOS 11.0, *)) {
         if (renderer.status == AVQueuedSampleBufferRenderingStatusFailed) {
             _loggedRenderError = true;
-            [self logMessage:@"[AVF] renderer FAILED — error=%@", renderer.error ?: @"(nil)"];
+            AVF_DIAG(@"[AVF] renderer FAILED — error=%@", renderer.error ?: @"(nil)");
         }
     }
 }
@@ -543,8 +637,8 @@ namespace
     if (!_isEnabled || !currentFormat) {
         return 0.0;
     }
-    const double lead = [self leadSeconds];
-    return (lead > 0.0 && lead == lead) ? lead : 0.0;
+    const double secs = [self lead].count(); // fsec → double seconds, foobar's get_latency() unit
+    return (secs > 0.0 && secs == secs) ? secs : 0.0;
 }
 
 - (bool)isProgressing {
