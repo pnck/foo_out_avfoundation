@@ -9,6 +9,7 @@
 
 #include <span>
 #include <vector>
+#include <functional>
 
 #ifdef __OBJC__
 #import <AVFoundation/AVFoundation.h>
@@ -23,13 +24,14 @@
 // Audio format setup - must be called before enable
 - (bool)setupAudioFormat:(uint32_t)sampleRate channels:(uint32_t)channels;
 
-// Push side (foobar2000's process_samples_v2). We are a SHALLOW sink: take at most the
-// frames that fit under the target lead, enqueue them, and return how many were taken.
-// foobar keeps the remainder and re-offers it. See README.md ("output pipeline contract").
-- (size_t)feedAudioData:(std::vector<float>)audioData
-             sampleRate:(uint32_t)sampleRate
+// Push side (foobar2000's process_samples_v2). Shallow sink: we decide how many of the offered
+// frames to take (under the target lead), allocate the destination block, and call
+// `convert(dst, frames)` to write that many interleaved float frames straight into it (single
+// copy). Returns frames actually taken; foobar keeps the remainder. See README.md.
+- (size_t)feedAudioData:(uint32_t)sampleRate
                channels:(uint32_t)channels
-             frameCount:(size_t)frameCount;
+             frameCount:(size_t)frameCount
+              converter:(const std::function<void(float *, size_t)> &)convert;
 
 - (void)flush;
 - (void)pause;
@@ -88,8 +90,11 @@ namespace foo_out_avf
         // Audio format setup - must be called before enable
         bool setupAudioFormat(double sampleRate, int channels);
 
-        // Returns the number of samples actually taken (may be < sample_count: partial).
-        size_t feedAudioData(std::vector<float>, uint32_t sampleRate, uint32_t channels, size_t sample_count);
+        // Decides how many of `frameCount` offered frames to take, then calls convert(dst, frames)
+        // to write that many interleaved float frames into the destination block (single copy).
+        // Returns frames actually taken (may be < frameCount: partial).
+        size_t feedAudioData(uint32_t sampleRate, uint32_t channels, size_t frameCount,
+                             const std::function<void(float *, size_t)> &convert);
         void flush();
         void pause();
         void resume();

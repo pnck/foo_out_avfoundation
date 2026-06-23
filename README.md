@@ -157,12 +157,6 @@ reactions — drive the diagnosis.
 
 ## bugs & todo
 
-- [x] glitch when refilling buffer queue — was 1-sample dribble feeding; fixed by batching (`kMinFeedSeconds`)
-- [x] AirPods / high-latency outputs stalled after one chunk — caused by starting the clock
-      ahead of the device (Bluetooth startup); fixed by `setDelaysRateChangeUntilHasSufficientMediaData = YES`
-      plus a lead floor ≥ the device latency. Follows the system default output (no pinned device).
 - [ ] glitch when audio sample rate changes
-- [x] wrong latency calculation — `get_latency()` now reports the real queued lead
 - [ ] `source is stalling` shown on stop (matches CoreAudio output; treated as benign for now)
-- [ ] reduce copy or conversion
 - [ ] custom virtual space configuration & UI

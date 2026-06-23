@@ -19,6 +19,7 @@
 #import <CoreMedia/CoreMedia.h>
 #include <vector>
 #include <algorithm>
+#include <functional>
 
 // Compatibility macros for different macOS versions' 3D audio API
 #ifndef AVAudio3DPointMake
@@ -353,14 +354,14 @@ namespace
 
 // --- push side: foobar2000's process_samples_v2 ----------------------------
 
-- (size_t)feedAudioData:(std::vector<float>)audioData
-             sampleRate:(uint32_t)sampleRate
+- (size_t)feedAudioData:(uint32_t)sampleRate
                channels:(uint32_t)channels
-             frameCount:(size_t)frameCount {
+             frameCount:(size_t)frameCount
+              converter:(const std::function<void(float *, size_t)> &)convert {
     if (!_isEnabled || _isPaused) {
         return 0;
     }
-    if (audioData.empty() || frameCount == 0 || channels == 0) {
+    if (frameCount == 0 || channels == 0) {
         return 0;
     }
     if (![self setupAudioFormat:sampleRate channels:channels]) {
@@ -383,7 +384,9 @@ namespace
         if (!data) {
             return 0;
         }
-        memcpy(data, audioData.data(), dataSize); // first `take` interleaved frames
+        // SINGLE COPY: convert foobar's f64 chunk straight into the CMBlockBuffer block, only the
+        // `take` frames we keep — no intermediate std::vector + memcpy.
+        convert(reinterpret_cast<float *>(data), take);
 
         CMBlockBufferRef blockBuffer = NULL;
         OSStatus status = CMBlockBufferCreateWithMemoryBlock(
@@ -675,9 +678,10 @@ namespace foo_out_avf
         return [impl freeSampleCount];
     }
 
-    size_t AVFEngine::feedAudioData(std::vector<float> audioData, uint32_t sampleRate, uint32_t channels, size_t sample_count) {
+    size_t AVFEngine::feedAudioData(uint32_t sampleRate, uint32_t channels, size_t frameCount,
+                                    const std::function<void(float *, size_t)> &convert) {
         AVFEngineImpl *impl = (__bridge AVFEngineImpl *)impl_;
-        return [impl feedAudioData:std::move(audioData) sampleRate:sampleRate channels:channels frameCount:sample_count];
+        return [impl feedAudioData:sampleRate channels:channels frameCount:frameCount converter:convert];
     }
 
     void AVFEngine::setLogCallback(void (*callback)(const char *message)) {

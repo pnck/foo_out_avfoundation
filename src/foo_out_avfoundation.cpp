@@ -123,20 +123,20 @@ namespace foo_out_avf
                 return 0;
             }
 
-            // Setup audio format if needed (this is safe to call multiple times)
-            engine.setupAudioFormat(sample_rate, channels);
-
-            // Convert from double (audio_sample) to float and keep interleaved format
+            // The engine decides how many frames to take, allocates the renderer's block, and
+            // calls back here to convert exactly that many — from foobar's f64 chunk straight
+            // into the block (single copy; no intermediate buffer). setupAudioFormat is done
+            // inside feedAudioData. Returns frames taken; foobar re-offers the remainder.
             const audio_sample *input_data = p_chunk.get_data();
-            std::vector<float> float_data(p_chunk.get_used_size());
+            return engine.feedAudioData(sample_rate, channels, sample_count,
+                                        [input_data, channels](float *dst, size_t frames) {
+                                            const size_t count = frames * channels;
 #if defined(AUDIO_MATH_NEON)
-            utils::neon_convert(input_data, float_data.data(), p_chunk.get_used_size());
+                                            utils::neon_convert(input_data, dst, count);
 #else
-            fb2k_audio_math::convert(input_data, float_data.data(), p_chunk.get_used_size());
+                                            fb2k_audio_math::convert(input_data, dst, count);
 #endif
-
-            size_t processed_samples = engine.feedAudioData(std::move(float_data), sample_rate, channels, sample_count);
-            return processed_samples;
+                                        });
         }
 
         // Maps to the engine's clock state. False during the priming phase (data queued but
