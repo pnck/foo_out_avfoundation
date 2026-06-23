@@ -17,8 +17,23 @@
 # ---------------------------------------------------------------------------
 cmake_minimum_required(VERSION 3.24)
 
+# ---------------------------------------------------------------------------
+# Version — ONE declared base, with overrides layered on top.
+#   * Bump BASE_VERSION (this single line) when you start a new version locally.
+#     A local Debug build appends the commit hash + dirty flag (see FB2K_VERSION below);
+#     a local Release build shows BASE_VERSION as-is.
+#   * On a tagged release CI passes -DVERSION_OVERRIDE=<tag>, which wins over BASE_VERSION,
+#     so the published build always matches its tag even if BASE_VERSION wasn't bumped.
+# Everything downstream — Info.plist's CFBundle*Version and the About-box string — derives
+# from this. There is no second place that hard-codes a version number.
+# ---------------------------------------------------------------------------
+set(BASE_VERSION "0.1.1")
+if(VERSION_OVERRIDE)
+    set(BASE_VERSION "${VERSION_OVERRIDE}")
+endif()
+
 project(foo_out_avfoundation
-    VERSION 0.1.1
+    VERSION ${BASE_VERSION}
     LANGUAGES C CXX OBJC OBJCXX)
 
 if(NOT APPLE)
@@ -50,31 +65,24 @@ add_compile_definitions($<$<CONFIG:Debug>:_DEBUG> $<$<CONFIG:Debug>:DEBUG>)
 # "" to skip signing entirely.
 set(CODESIGN_IDENTITY "-" CACHE STRING "codesign identity ('-' = ad-hoc, '' = none)")
 
-# Component version string for DECLARE_COMPONENT_VERSION (main.cpp's CURRENT_VERSION). Derived
-# from git, differing by build type:
-#   Debug   -> <project-version>-g<short-hash>[-dirty]   (a dev build, traceable to commit + state)
-#   Release -> <project-version>                          (the clean tag version)
-# CI / packagers can force an exact string with -DFB2K_VERSION_OVERRIDE=... The numeric
-# PROJECT_VERSION above stays separate because it feeds the Info.plist (which requires x.y.z).
-# Recomputed every configure (never cached) so the hash / dirty flag can't go stale.
-unset(FB2K_VERSION CACHE) # drop any value cached by older revisions of this file
-if(FB2K_VERSION_OVERRIDE)
-    set(FB2K_VERSION "${FB2K_VERSION_OVERRIDE}")
-else()
-    set(FB2K_VERSION "${PROJECT_VERSION}")
-    find_package(Git QUIET)
-    if(GIT_FOUND AND CMAKE_BUILD_TYPE STREQUAL "Debug")
-        execute_process(COMMAND "${GIT_EXECUTABLE}" rev-parse --short HEAD
-            WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
-            OUTPUT_VARIABLE _git_hash OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
-        execute_process(COMMAND "${GIT_EXECUTABLE}" status --porcelain --untracked-files=no
-            WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
-            OUTPUT_VARIABLE _git_dirty OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
-        if(_git_hash)
-            set(FB2K_VERSION "${PROJECT_VERSION}-${_git_hash}")
-            if(_git_dirty)
-                string(APPEND FB2K_VERSION "-dirty")
-            endif()
+# About-box string for DECLARE_COMPONENT_VERSION (main.cpp's CURRENT_VERSION). Starts from
+# PROJECT_VERSION (= BASE_VERSION, or the tag when overridden) and, for Debug, appends the commit
+# hash + dirty flag so a dev build is traceable to a commit + state. A clean Release / tagged build
+# shows just the version. Never cached, so the hash / dirty flag can't go stale.
+unset(FB2K_VERSION CACHE)
+set(FB2K_VERSION "${PROJECT_VERSION}")
+find_package(Git QUIET)
+if(GIT_FOUND AND CMAKE_BUILD_TYPE STREQUAL "Debug")
+    execute_process(COMMAND "${GIT_EXECUTABLE}" rev-parse --short HEAD
+        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+        OUTPUT_VARIABLE _git_hash OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+    execute_process(COMMAND "${GIT_EXECUTABLE}" status --porcelain --untracked-files=no
+        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+        OUTPUT_VARIABLE _git_dirty OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+    if(_git_hash)
+        set(FB2K_VERSION "${PROJECT_VERSION}-${_git_hash}")
+        if(_git_dirty)
+            string(APPEND FB2K_VERSION "-dirty")
         endif()
     endif()
 endif()

@@ -1,0 +1,61 @@
+name: Build And Publish
+
+# Release pipeline: push a vX.Y.Z tag and CI builds a signed Release, packs it into a
+# .fb2k-component, and publishes a GitHub Release. The tag is the single source of truth for
+# the version (fed to CMake via VERSION_OVERRIDE). Day-to-day CI lives in build.yml.
+# Tagged-release ONLY: pushing a vX.Y.Z tag triggers this and publishes a Release. A normal push
+# to main does NOT — that runs build.yml, which never publishes. (Mirrors foo_input_ncm's split.)
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+
+permissions:
+  contents: write # needed for softprops/action-gh-release to create the Release
+
+jobs:
+  publish:
+    name: Build & Publish (Release)
+    # Apple-silicon runner: matches the arm64-only build (Spatial Audio is Apple-silicon only).
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
+          fetch-tags: true
+          fetch-depth: 0
+
+      - name: Install Ninja
+        run: brew install ninja
+
+      - name: Import Certificate
+        uses: apple-actions/import-codesign-certs@v7
+        with:
+          p12-file-base64: ${{ secrets.CERTIFICATES_P12_B64 }}
+          p12-password: ${{ secrets.CERTIFICATES_P12_PASSWORD }}
+
+      - name: Configure & Build (version from tag)
+        run: |
+          # vX.Y.Z -> X.Y.Z. The tag overrides BASE_VERSION, so it sets BOTH the Info.plist
+          # CFBundle*Version and the About-box string in one shot — the tag is authoritative.
+          TAG=$(git describe --tags)
+          VERSION=${TAG#v}
+          echo "Publishing version: $VERSION (tag $TAG)"
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DVERSION_OVERRIDE="$VERSION" \
+            -DCODESIGN_IDENTITY="${{ secrets.TEAM_ID }}"
+          cmake --build build --parallel
+
+      - name: Pack .fb2k-component
+        working-directory: ${{ github.workspace }}/dist
+        # dist/mac/foo_out_avfoundation.component -> a zip whose root is mac/ (fb2k component layout)
+        run: zip -r "${{ github.workspace }}/foo_out_avfoundation.fb2k-component" mac
+
+      - name: Publish Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ github.workspace }}/foo_out_avfoundation.fb2k-component
+          make_latest: true
+          generate_release_notes: true
