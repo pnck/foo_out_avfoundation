@@ -49,7 +49,10 @@ namespace
     // clock, then keep filling up to the full lead while already playing. Keeps startup snappy
     // without sacrificing the deep steady-state buffer.
     constexpr double kPrimeSeconds = 0.2;
-    constexpr double kMinBufferSeconds = 0.1; // floor: keep at least this much working set in AVF
+    // Floor on the lead. Must exceed high-latency routes' device latency (AirPods/Bluetooth is
+    // ~160 ms) so that, with setDelaysRateChangeUntilHasSufficientMediaData = YES, the renderer
+    // can buffer enough for the synchronizer to start the clock reliably on those devices.
+    constexpr double kMinBufferSeconds = 0.3;
     // Minimum batch we accept in one go. Without this we top the lead up one or two SAMPLES at
     // a time (foobar polls faster than the renderer drains), enqueueing a flood of ~1-sample
     // CMSampleBuffers that thrash AVFoundation's AudioQueue timeline ("Resyncing AQ timeline" +
@@ -84,6 +87,7 @@ namespace
     uint64_t _diagFeed;
     uint64_t _diagUnderrun;
     bool _diagWasReady;
+    bool _loggedRenderError; // one-shot: log the renderer's failure reason at most once per enable
 
     bool _isPaused;
 
@@ -112,8 +116,13 @@ namespace
         [synchronizer addRenderer:renderer];
 
         if (@available(tvOS 14.5, iOS 14.5, macOS 11.3, *)) {
-            // We do our own priming, so rate changes must take effect immediately.
-            [synchronizer setDelaysRateChangeUntilHasSufficientMediaData:NO];
+            // YES (the default): hold the clock until the renderer has buffered enough to start
+            // reliably, in step with the actual device. With NO, setRate:1 starts our clock
+            // immediately; on a slow/high-latency route (AirPods: ~315 ms Bluetooth start,
+            // ~160 ms device latency) the clock runs ahead during the device's startup, so when
+            // audio finally begins there's a gap and the spatializer/AudioQueue underruns after a
+            // chunk. (Built-in starts in ~20 ms, so the gap was harmless there.)
+            [synchronizer setDelaysRateChangeUntilHasSufficientMediaData:YES];
         }
     } else {
         renderer = nil;
@@ -127,6 +136,7 @@ namespace
     _diagFeed = 0;
     _diagUnderrun = 0;
     _diagWasReady = false;
+    _loggedRenderError = false;
     _isEnabled = false;
     _isPaused = false;
     _logCallback = nullptr;
@@ -253,8 +263,11 @@ namespace
             renderer.allowedAudioSpatializationFormats = AVAudioSpatializationFormatMonoStereoAndMultichannel;
         }
         renderer.muted = NO;
+        // Leave audioOutputDeviceUniqueID at nil: per Apple's docs that means "use the default
+        // audio device", i.e. follow whatever the system output is. We never pin a device.
 
         [self resetTimeline]; // clock at 0, rate 0, priming
+        _loggedRenderError = false;
         _isPaused = false;
         _isEnabled = true;
         [self logMessage:@"[AVF] Audio engine enabled (lead %.0f ms, prime %.0f ms)",
@@ -421,6 +434,7 @@ namespace
 
         [renderer enqueueSampleBuffer:sampleBuffer];
         CFRelease(sampleBuffer);
+        [self logRendererErrorIfFailed]; // did this enqueue/route just push the renderer into failure?
 
         // Advance from the anchored pts (so after a snap, the accumulator follows the clock).
         _presentationTime = CMTimeAdd(pts, CMTimeMake((int64_t)take, (int32_t)sampleRate));
@@ -477,10 +491,26 @@ namespace
     return ready;
 }
 
+// Surface a renderer failure (e.g. AirPods rejecting our format / spatialization path failing).
+// Once the renderer enters the failed state it stops consuming, so playback stalls after a chunk
+// while the synchronizer clock keeps running. Logged once per enable so the actual NSError shows.
+- (void)logRendererErrorIfFailed {
+    if (_loggedRenderError) {
+        return;
+    }
+    if (@available(macOS 11.0, *)) {
+        if (renderer.status == AVQueuedSampleBufferRenderingStatusFailed) {
+            _loggedRenderError = true;
+            [self logMessage:@"[AVF] renderer FAILED — error=%@", renderer.error ?: @"(nil)"];
+        }
+    }
+}
+
 - (size_t)freeSampleCount {
     if (!_isEnabled || _isPaused) {
         return 0;
     }
+    [self logRendererErrorIfFailed]; // catch failures even when feeding has stalled (foobar polls this)
     if (currentFormat == nil) {
         return SIZE_MAX; // can take, but no hint on how much until we know the format
     }

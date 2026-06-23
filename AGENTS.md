@@ -32,6 +32,19 @@ on foobar's single playback thread; there are no AVF callbacks, no staging queue
 - **`_targetLeadSeconds` comes from `p_buffer_length`, floored at `kMinBufferSeconds`.** It is
   NOT the cause of the crackle (batching is); keep a sane floor so a tiny configured buffer
   still leaves a usable working set.
+- **`setDelaysRateChangeUntilHasSufficientMediaData = YES` (the default — never set NO).** The
+  synchronizer must hold the clock until the renderer has buffered enough to start *in step with
+  the device*. With NO, `setRate:1` advances our clock immediately; on a high-latency route
+  (AirPods: ~315 ms Bluetooth startup + ~160 ms device latency) the clock runs ahead during the
+  device's startup, so when audio finally begins there's a gap and the spatializer/AudioQueue
+  underruns after one chunk while the seek bar keeps moving. Built-in starts in ~20 ms, which is
+  why this hid there. Diagnosed from a macOS unified-log capture on AirPods.
+- **The lead floor (`kMinBufferSeconds`) is load-bearing *because* of the rule above, not
+  redundant with it.** We cap how much we feed at the lead, and YES won't start the clock until
+  the renderer has "sufficient" data, which on AirPods ≈ its device latency (~160 ms). So the
+  lead must be ≥ that or the clock never starts (silence). The floor is currently a blunt 300 ms
+  on every device; the clean alternative is to stop capping the feed until `currentTime > 0`
+  (clock actually started), letting the renderer buffer per-device, then cap small again.
 - **Prime before playing; don't start the clock at `enable()`.** The clock starts only when
   the banked lead reaches `_primeSeconds` (small, for snappy startup), or on `force_play()`;
   filling continues up to `_targetLeadSeconds` while playing. Starting at `enable()` let a
