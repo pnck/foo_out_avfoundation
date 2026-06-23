@@ -342,6 +342,8 @@ dist/
 
 # tests
 venv/
+# Generated on demand by tests/sweep_generator.py — never committed.
+/tests/sweep.wav
 
 # CMake
 /build/
