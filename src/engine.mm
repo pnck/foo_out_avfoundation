@@ -28,9 +28,10 @@
     }
 #endif
 
-// Diagnostic tracing (the high-frequency [AVF] feed/underrun/gate/primed lines). Compiled out
-// in Release (NDEBUG); operational logs (enable/disable, errors) stay in every build. Used only
-// inside instance methods, where `self` is in scope.
+// Diagnostic logging — the [AVF] feed/underrun/gate/primed traces. Compiled out in Release
+// (NDEBUG); operational logs (enable/disable, errors) stay in every build. The log callback
+// hands these to the main thread (fb2k::inMainThread), so even calls from the realtime feed
+// thread don't block on console I/O. Used only inside instance methods (`self` in scope).
 #ifdef NDEBUG
 #define AVF_DIAG(...) ((void)0)
 #else

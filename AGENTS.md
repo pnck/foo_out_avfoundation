@@ -52,6 +52,13 @@ on foobar's single playback thread; there are no AVF callbacks, no staging queue
   it for the seek bar and A/V sync; a constant breaks both.
 - **No timers / dispatch_source / busy-wait.** foobar's `update`/`process_samples` polling
   is the only pump. We never poll AVF and never spin.
+- **Log across threads via `fb2k::inMainThread`, never synchronously from the feed thread.**
+  `process_samples_v2`/`feedAudioData` run on foobar's audio thread. `console::print` is
+  thread-safe but dispatches to receivers *synchronously* (UI marshaling), so calling it there
+  can stall feeding → crackle (it bit only Debug, since Release compiles the diag macros out).
+  The log callback hands every line to `fb2k::inMainThread([line]{ FB2K_console_print(...); })`,
+  which queues and returns immediately (SDK `threadsLite.h`). Diagnostics stay behind the single
+  Debug-only `AVF_DIAG` macro — do not split it or block the audio thread on console I/O.
 - **Volume is pass-through** to `renderer.volume` (linear, no dB/curve conversion). foobar
   already scaled the samples.
 - **Pause = `setRate:0`, resume = `setRate:1` (only if primed), flush = `[renderer flush]` +

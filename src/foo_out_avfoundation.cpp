@@ -9,16 +9,11 @@
 #include "common/consts.hpp"
 #include "common/utils.hpp"
 #include "engine.h"
-#include <thread>
-#include <fstream>
-#include <semaphore>
 #include <vector>
 #include <span>
 #include <chrono>
 #include <mutex>
-
-// Debug configuration - uncomment to enable audio dump
-// #define ENABLE_AUDIO_DUMP 1
+#include <string>
 
 namespace
 {
@@ -36,7 +31,10 @@ namespace
         ~CallTimerHelper() {
             const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
             if (ms > ms_too_long) {
-                FB2K_console_print("[AVF] SLOW callback ", name, ": ", (int)ms, " ms (blocked playback thread)");
+                // Don't block this (playback) thread on console I/O — queue it to the main thread.
+                std::string msg = std::string("[AVF] SLOW callback ") + name + ": " + std::to_string((int)ms) +
+                                  " ms (blocked playback thread)";
+                fb2k::inMainThread([msg = std::move(msg)]() { FB2K_console_print(msg.c_str()); });
             }
         }
     };
@@ -50,53 +48,6 @@ namespace foo_out_avf
         AVFEngine engine;
         bool is_active;
         bool is_paused;
-
-#ifdef ENABLE_AUDIO_DUMP
-        // Debug function to dump audio data to file
-        void debugDumpAudioData(const audio_chunk &p_chunk) {
-            static std::counting_semaphore read_sem(1), write_sem(0);
-            static std::vector<audio_sample> dump_buffer;
-            static size_t samples_written = 0;
-
-            const auto sample_rate = p_chunk.get_sample_rate();
-            const size_t sample_count = p_chunk.get_sample_count();
-            const size_t used_size = p_chunk.get_used_size();
-            const auto max_samples_to_save = 10 * sample_rate; // 10 seconds worth of audio
-            const double _should_last = static_cast<double>(sample_count) / sample_rate;
-
-            const audio_sample *samples = p_chunk.get_data();
-            if (samples_written < max_samples_to_save) {
-                read_sem.acquire();
-                dump_buffer.clear();
-                dump_buffer.resize(used_size);
-                fb2k_audio_math::convert(samples, dump_buffer.data(), used_size);
-                write_sem.release();
-            }
-
-            static std::thread dump_thread([this, max_samples_to_save] {
-                std::ofstream output_file("/tmp/au.data", std::ios::binary);
-                while (is_active && !is_paused && samples_written < max_samples_to_save) {
-                    write_sem.acquire();
-                    if (is_active && dump_buffer.size() > 0) {
-                        FB2K_console_print("Writing ", dump_buffer.size(), " samples to /tmp/au.data [", samples_written, "]");
-                        output_file.write(reinterpret_cast<const char *>(dump_buffer.data()),
-                                          dump_buffer.size() * sizeof(decltype(dump_buffer)::value_type));
-                        samples_written += dump_buffer.size(); // Use buffer size instead of sample_count
-                    }
-                    read_sem.release();
-                }
-                output_file.flush();
-                FB2K_console_print("Finished writing audio data to /tmp/au.data\n");
-            });
-
-            static bool thread_started = false;
-            if (!thread_started) {
-                dump_thread.detach();
-                thread_started = true;
-            }
-            std::this_thread::sleep_for(std::chrono::duration<double>(_should_last));
-        }
-#endif
 
     public:
         static constexpr GUID class_guid = guid_output_avfoundation;
@@ -115,7 +66,13 @@ namespace foo_out_avf
     public:
         AVFOutput(const GUID &p_device, double p_buffer_length, bool p_dither, t_uint32 p_bitdepth) : is_active(false), is_paused(false) {
 
-            engine.setLogCallback([](const char *message) { FB2K_console_print(message); });
+            // Engine logs can originate on foobar's realtime feed thread. console::print is
+            // thread-safe but dispatches to its receivers synchronously (UI marshaling), which
+            // can stall that thread and glitch playback. Hand the line to the main thread via
+            // fb2k::inMainThread() — it queues and returns immediately (SDK threadsLite.h).
+            engine.setLogCallback([](const char *message) {
+                fb2k::inMainThread([line = std::string(message)]() { FB2K_console_print(line.c_str()); });
+            });
             // Keep foobar's configured buffer length worth of audio enqueued in the renderer
             // (the steady-state lead). Too small a lead underruns AVF between refills.
             engine.setBufferLength(p_buffer_length);
@@ -149,8 +106,10 @@ namespace foo_out_avf
             if (is_paused) {
                 static size_t paused_calls = 0;
                 if ((paused_calls++ % 20) == 0) {
-                    FB2K_console_print("[AVF] process_samples_v2 called while paused (", p_chunk.get_sample_count(),
-                                       " samples, count=", paused_calls, ") -> returning 0");
+                    std::string msg = std::string("[AVF] process_samples_v2 called while paused (") +
+                                      std::to_string(p_chunk.get_sample_count()) +
+                                      " samples, count=" + std::to_string(paused_calls) + ") -> returning 0";
+                    fb2k::inMainThread([msg = std::move(msg)]() { FB2K_console_print(msg.c_str()); });
                 }
                 return 0;
             }
@@ -174,19 +133,6 @@ namespace foo_out_avf
             utils::neon_convert(input_data, float_data.data(), p_chunk.get_used_size());
 #else
             fb2k_audio_math::convert(input_data, float_data.data(), p_chunk.get_used_size());
-#endif
-#ifdef ENABLE_AUDIO_DUMP
-            audio_chunk_impl ac;
-            ac.set_channels(1);
-            // Extract first channel for debugging
-            std::vector<float> first_channel(sample_count);
-            for (size_t i = 0; i < sample_count; i++) {
-                first_channel[i] = float_data[i * channels]; // First channel only
-            }
-            ac.set_data_32(first_channel.data(), sample_count, 1, sample_rate);
-
-            // Debug: dump audio data to file
-            debugDumpAudioData(ac);
 #endif
 
             size_t processed_samples = engine.feedAudioData(std::move(float_data), sample_rate, channels, sample_count);
