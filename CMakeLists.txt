@@ -27,7 +27,7 @@ cmake_minimum_required(VERSION 3.24)
 # Everything downstream — Info.plist's CFBundle*Version and the About-box string — derives
 # from this. There is no second place that hard-codes a version number.
 # ---------------------------------------------------------------------------
-set(BASE_VERSION "0.1.1")
+set(BASE_VERSION "0.2.0")
 if(VERSION_OVERRIDE)
     set(BASE_VERSION "${VERSION_OVERRIDE}")
 endif()

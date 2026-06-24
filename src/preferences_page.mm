@@ -34,7 +34,8 @@ namespace
         }
         const char *get_name() override { return "AVFoundation Output"; }
         GUID get_guid() override { return guid_preferences_v3d; }
-        GUID get_parent_guid() override { return guid_tools; }
+        // Sit under Playback > Output (where an output component belongs), not Tools.
+        GUID get_parent_guid() override { return guid_output; }
     };
 
     FB2K_SERVICE_FACTORY(preferences_page_v3d);

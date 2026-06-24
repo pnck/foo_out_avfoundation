@@ -16,16 +16,36 @@ beside each other, selected at runtime by `OutputMode`:
 - **`engine_sys_spatialized.mm`** (`AVFSysSpatializedBackend`) — the default backend: `AVSampleBufferAudioRenderer`
   + `AVSampleBufferRenderSynchronizer`, the system Spatial Audio path (Control Center, head tracking).
   Everything below in this memo describes this backend.
-- **`engine_virtual_3d.h` / `.mm`** (`AVFVirtual3DBackend`) — the V3D backend: `AVAudioEngine` +
-  `AVAudioPlayerNode` + `AVAudioEnvironmentNode`, rendering in-process with `HRTFHQ` for custom source
-  placement (the system spatializer offers no per-source position). Currently a scaffold; the feed
-  path is TODO — switch to an `AVAudioSourceNode` pull, the same shallow-sink model as the default.
-- **`v3d_config.h` / `.cpp`** — configStore-backed settings (output mode + source position/size/spread);
-  **`v3d_config_bridge.h` / `.mm`** is its `V3DConfig` Objective-C face for the Swift UI.
-- **preferences UI** — Swift: `preferences_view_controller.swift` (the page), `panner_pad_view.swift`
-  (the dual 2D pads), `scene_view.swift` (read-only SceneKit preview). `preferences_page.mm` registers
-  the fb2k `preferences_page` and instantiates the Swift controller; `bridging_header.h` exposes the
-  ObjC bridge to Swift.
+- **`engine_virtual_3d.h` / `.mm`** (`AVFVirtual3DBackend`) — the V3D backend: a VIRTUAL SPEAKER RIG.
+  Each content channel is deinterleaved into its own mono `AVAudioSourceNode`, positioned at a virtual
+  loudspeaker location, all feeding one `AVAudioEnvironmentNode` (`HRTFHQ`). The listener sits at the
+  origin; the user arranges the speakers. This preserves and spatializes the stereo/multichannel image
+  the way real headphone-surround products do — NOT a mono point source (that would collapse the music
+  to a toy). Speaker placement is a DAW-style abstraction: front pair + rear pair, each with
+  {distance, spacing, center azimuth, center elevation}, plus a free-positioned mono center and LFE;
+  the engine converts that (spherical → XYZ) to each bus's `position`. Channel→speaker mapping is by
+  content channel count (stereo→front pair; 5.1→front pair + center + LFE + rear pair).
+  A PULL graph: each source node pulls on the realtime render thread while foobar pushes on its
+  playback thread; they meet at one single-producer/single-consumer lock-free ring PER channel (all fed
+  in lockstep). Same shallow-sink contract as the default backend (partial consumption, prime lead,
+  kMinFeed batching, device-transport lead floor), but the "queue" is the rings and "start the clock"
+  is the shared `primed` flag that lets the render blocks drain. Reconfiguration (format/channel-count
+  change, flush) stops the engine first to quiesce the render thread, so the only concurrent access is
+  the steady-state SPSC rings — no locks.
+- **`v3d_config.h` / `.cpp`** — the speaker-rig settings (output mode + the `Layout`: front/rear pairs
+  with {distance, spacing, azimuth, elevation}, mono centre + LFE positions) and the shared geometry
+  (`compute_speakers`: layout → the six speaker XYZ). configStore-backed for persistence, with an
+  in-memory cache + a `layout_generation()` counter: the UI's `set_layout` persists and bumps the
+  generation; the engine watches it each feed and re-positions its sources live (no observer plumbing,
+  no UI-thread node mutation, no configStore race — cache reads under one mutex).
+  **`v3d_config_bridge.h` / `.mm`** is its `V3DConfig` Objective-C face for the Swift UI (one class
+  property per layout field + `speakerPositions` for the preview).
+- **preferences UI** — Swift: `preferences_view_controller.swift` (the page), `stage_view.swift` (the
+  top-down stage: drag the front/rear pair centres + mono centre/LFE around the listener, with derived
+  speaker feedback dots), `scene_view.swift` (`SceneRigView`, live SceneKit preview of all six speakers).
+  Per-pair spacing/elevation and mono height are sliders. Every edit writes through `V3DConfig` → live.
+  `preferences_page.mm` registers the fb2k `preferences_page` and instantiates the Swift controller by
+  its `@objc` runtime name; `bridging_header.h` exposes the ObjC bridge to Swift.
 
 CMake globs `src/*.{cpp,mm}` and `src/*.swift` into the one module (Swift enabled unconditionally),
 so new files need no build-system change.

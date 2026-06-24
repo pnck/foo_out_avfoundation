@@ -2,12 +2,18 @@
 //  v3d_config.cpp
 //  foo_out_avfoundation
 //
-//  configStore-backed implementation of the V3D configuration accessors. Keys are namespaced under
-//  "foo_out_avf." so they don't collide with other components' settings.
+//  configStore-backed implementation of the V3D configuration. Keys are namespaced under "foo_out_avf."
+//  so they don't collide with other components' settings. The layout is cached in memory behind a mutex
+//  (the read source for both the audio thread and the UI); configStore is touched only on first load
+//  and on writes, so the two threads never race on it. See v3d_config.h for the live-update contract.
 //
 
 #include "v3d_config.h"
 #include "foobar2000/SDK/configStore.h"
+
+#include <atomic>
+#include <cmath>
+#include <mutex>
 
 namespace foo_out_avf
 {
@@ -16,52 +22,137 @@ namespace foo_out_avf
         namespace
         {
             constexpr const char *K_MODE = "foo_out_avf.mode";
-            constexpr const char *K_SRC_X = "foo_out_avf.src.x";
-            constexpr const char *K_SRC_Y = "foo_out_avf.src.y";
-            constexpr const char *K_SRC_Z = "foo_out_avf.src.z";
-            constexpr const char *K_SIZE = "foo_out_avf.size";
-            constexpr const char *K_SPREAD = "foo_out_avf.spread";
-            constexpr const char *K_YAW = "foo_out_avf.listener.yaw";
-            constexpr const char *K_PITCH = "foo_out_avf.listener.pitch";
-            constexpr const char *K_ROLL = "foo_out_avf.listener.roll";
+
+            constexpr const char *K_FRONT_DIST = "foo_out_avf.front.distance";
+            constexpr const char *K_FRONT_SPACING = "foo_out_avf.front.spacing";
+            constexpr const char *K_FRONT_AZ = "foo_out_avf.front.azimuth";
+            constexpr const char *K_FRONT_EL = "foo_out_avf.front.elevation";
+
+            constexpr const char *K_REAR_DIST = "foo_out_avf.rear.distance";
+            constexpr const char *K_REAR_SPACING = "foo_out_avf.rear.spacing";
+            constexpr const char *K_REAR_AZ = "foo_out_avf.rear.azimuth";
+            constexpr const char *K_REAR_EL = "foo_out_avf.rear.elevation";
+
+            constexpr const char *K_CENTER_X = "foo_out_avf.center.x";
+            constexpr const char *K_CENTER_Y = "foo_out_avf.center.y";
+            constexpr const char *K_CENTER_Z = "foo_out_avf.center.z";
+
+            constexpr const char *K_LFE_X = "foo_out_avf.lfe.x";
+            constexpr const char *K_LFE_Y = "foo_out_avf.lfe.y";
+            constexpr const char *K_LFE_Z = "foo_out_avf.lfe.z";
 
             fb2k::configStore::ptr store() { return fb2k::configStore::get(); }
+
+            std::mutex g_mutex;
+            bool g_loaded = false;
+            Layout g_layout;
+            std::atomic<unsigned long long> g_generation{0};
+            std::atomic<unsigned long long> g_modeGeneration{0};
+
+            // Pull the layout out of configStore (defaults from default_layout()). Caller holds g_mutex.
+            void load_locked() {
+                const Layout d = default_layout();
+                auto s = store();
+                g_layout.front.distance = s->getConfigFloat(K_FRONT_DIST, d.front.distance);
+                g_layout.front.spacingDeg = s->getConfigFloat(K_FRONT_SPACING, d.front.spacingDeg);
+                g_layout.front.centerAzDeg = s->getConfigFloat(K_FRONT_AZ, d.front.centerAzDeg);
+                g_layout.front.centerElDeg = s->getConfigFloat(K_FRONT_EL, d.front.centerElDeg);
+                g_layout.rear.distance = s->getConfigFloat(K_REAR_DIST, d.rear.distance);
+                g_layout.rear.spacingDeg = s->getConfigFloat(K_REAR_SPACING, d.rear.spacingDeg);
+                g_layout.rear.centerAzDeg = s->getConfigFloat(K_REAR_AZ, d.rear.centerAzDeg);
+                g_layout.rear.centerElDeg = s->getConfigFloat(K_REAR_EL, d.rear.centerElDeg);
+                g_layout.center.x = s->getConfigFloat(K_CENTER_X, d.center.x);
+                g_layout.center.y = s->getConfigFloat(K_CENTER_Y, d.center.y);
+                g_layout.center.z = s->getConfigFloat(K_CENTER_Z, d.center.z);
+                g_layout.lfe.x = s->getConfigFloat(K_LFE_X, d.lfe.x);
+                g_layout.lfe.y = s->getConfigFloat(K_LFE_Y, d.lfe.y);
+                g_layout.lfe.z = s->getConfigFloat(K_LFE_Z, d.lfe.z);
+                g_loaded = true;
+            }
+
+            // Write the layout back to configStore. Caller holds g_mutex.
+            void persist_locked(const Layout &l) {
+                auto s = store();
+                s->setConfigFloat(K_FRONT_DIST, l.front.distance);
+                s->setConfigFloat(K_FRONT_SPACING, l.front.spacingDeg);
+                s->setConfigFloat(K_FRONT_AZ, l.front.centerAzDeg);
+                s->setConfigFloat(K_FRONT_EL, l.front.centerElDeg);
+                s->setConfigFloat(K_REAR_DIST, l.rear.distance);
+                s->setConfigFloat(K_REAR_SPACING, l.rear.spacingDeg);
+                s->setConfigFloat(K_REAR_AZ, l.rear.centerAzDeg);
+                s->setConfigFloat(K_REAR_EL, l.rear.centerElDeg);
+                s->setConfigFloat(K_CENTER_X, l.center.x);
+                s->setConfigFloat(K_CENTER_Y, l.center.y);
+                s->setConfigFloat(K_CENTER_Z, l.center.z);
+                s->setConfigFloat(K_LFE_X, l.lfe.x);
+                s->setConfigFloat(K_LFE_Y, l.lfe.y);
+                s->setConfigFloat(K_LFE_Z, l.lfe.z);
+            }
+
+            Vec3 spherical(double azDeg, double elDeg, double dist) {
+                const double az = azDeg * (M_PI / 180.0);
+                const double el = elDeg * (M_PI / 180.0);
+                const double ce = std::cos(el);
+                return Vec3{dist * ce * std::sin(az), dist * std::sin(el), -dist * ce * std::cos(az)};
+            }
         } // namespace
+
+        Layout default_layout() {
+            // Standard 5.1 (ITU-R BS.775): front L/R at ±30°, surrounds at ±110°, mono centre dead
+            // ahead, all on a 2 m arc; LFE front and low (its position is non-directional anyway).
+            Layout d;
+            d.front = SpeakerPair{2.0, 60.0, 0.0, 0.0};    // ±30° in front
+            d.rear = SpeakerPair{2.0, 140.0, 180.0, 0.0};  // surrounds at ±110° (180° ± 70°)
+            d.center = Vec3{0.0, 0.0, -2.0};               // mono centre, dead ahead
+            d.lfe = Vec3{0.0, -0.4, -1.5};                 // mono LFE, front and low
+            return d;
+        }
+
+        SpeakerPositions compute_speakers(const Layout &l) {
+            SpeakerPositions s;
+            // Front: left is centre-spacing/2 (more to the left), right is centre+spacing/2.
+            s.fl = spherical(l.front.centerAzDeg - l.front.spacingDeg * 0.5, l.front.centerElDeg, l.front.distance);
+            s.fr = spherical(l.front.centerAzDeg + l.front.spacingDeg * 0.5, l.front.centerElDeg, l.front.distance);
+            // Rear: handedness flips facing backwards (azimuth ~180°), so left surround = centre+spacing/2.
+            s.rl = spherical(l.rear.centerAzDeg + l.rear.spacingDeg * 0.5, l.rear.centerElDeg, l.rear.distance);
+            s.rr = spherical(l.rear.centerAzDeg - l.rear.spacingDeg * 0.5, l.rear.centerElDeg, l.rear.distance);
+            s.c = l.center;
+            s.lfe = l.lfe;
+            return s;
+        }
 
         OutputMode mode() {
             return store()->getConfigInt(K_MODE, 0) == 1 ? OutputMode::Virtual3D : OutputMode::SystemSpatial;
         }
         void set_mode(OutputMode m) {
             store()->setConfigInt(K_MODE, m == OutputMode::Virtual3D ? 1 : 0);
+            g_modeGeneration.fetch_add(1, std::memory_order_release);
         }
 
-        Vec3 source_position() {
-            auto s = store();
-            return Vec3{s->getConfigFloat(K_SRC_X, 0.0), s->getConfigFloat(K_SRC_Y, 0.0),
-                        s->getConfigFloat(K_SRC_Z, -2.0)};
-        }
-        void set_source_position(const Vec3 &p) {
-            auto s = store();
-            s->setConfigFloat(K_SRC_X, p.x);
-            s->setConfigFloat(K_SRC_Y, p.y);
-            s->setConfigFloat(K_SRC_Z, p.z);
+        unsigned long long mode_generation() {
+            return g_modeGeneration.load(std::memory_order_acquire);
         }
 
-        double size() { return store()->getConfigFloat(K_SIZE, 0.0); }
-        void set_size(double v) { store()->setConfigFloat(K_SIZE, v); }
-        double spread() { return store()->getConfigFloat(K_SPREAD, 0.0); }
-        void set_spread(double v) { store()->setConfigFloat(K_SPREAD, v); }
-
-        Vec3 listener_orientation() {
-            auto s = store();
-            return Vec3{s->getConfigFloat(K_YAW, 0.0), s->getConfigFloat(K_PITCH, 0.0),
-                        s->getConfigFloat(K_ROLL, 0.0)};
+        Layout layout() {
+            std::lock_guard<std::mutex> lock(g_mutex);
+            if (!g_loaded) {
+                load_locked();
+            }
+            return g_layout;
         }
-        void set_listener_orientation(const Vec3 &o) {
-            auto s = store();
-            s->setConfigFloat(K_YAW, o.x);
-            s->setConfigFloat(K_PITCH, o.y);
-            s->setConfigFloat(K_ROLL, o.z);
+
+        void set_layout(const Layout &l) {
+            {
+                std::lock_guard<std::mutex> lock(g_mutex);
+                g_layout = l;
+                g_loaded = true;
+                persist_locked(l);
+            }
+            g_generation.fetch_add(1, std::memory_order_release);
+        }
+
+        unsigned long long layout_generation() {
+            return g_generation.load(std::memory_order_acquire);
         }
 
     } // namespace v3d_config

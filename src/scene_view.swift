@@ -2,16 +2,27 @@
 //  scene_view.swift
 //  foo_out_avfoundation
 //
-//  Read-only SceneKit visualization of the virtual field: a listener at the origin and a source
-//  marker the 2D pads drive. Orbit the camera to inspect; you do NOT place the source here (dragging
-//  in true 3D is ambiguous — that's what the 2D pads are for). Purely a feedback view.
+//  Read-only SceneKit preview of the virtual speaker rig: the listener at the origin and the six
+//  virtual speakers (FL, FR, C, LFE, RL, RR) at the positions the engine actually renders (fed from
+//  V3DConfig.speakerPositions — the same geometry). Orbit the camera to inspect; you place speakers
+//  with the 2D stage + sliders, not by dragging here (true-3D dragging is ambiguous). Feedback only.
 //
 
 import SceneKit
 
-final class Scene3DView: SCNView {
+final class SceneRigView: SCNView {
 
-    private let sourceNode = SCNNode()
+    // Speaker marker nodes in the fixed order [FL, FR, C, LFE, RL, RR].
+    private var speakerNodes: [SCNNode] = []
+
+    private static let speakerColors: [NSColor] = [
+        .systemBlue,   // FL
+        .systemBlue,   // FR
+        .systemGreen,  // C
+        .systemPurple, // LFE
+        .systemOrange, // RL
+        .systemOrange, // RR
+    ]
 
     func setupScene() {
         let s = SCNScene()
@@ -25,10 +36,13 @@ final class Scene3DView: SCNView {
         listener.geometry?.firstMaterial?.diffuse.contents = NSColor.secondaryLabelColor
         s.rootNode.addChildNode(listener)
 
-        // source marker
-        sourceNode.geometry = SCNSphere(radius: 0.14)
-        sourceNode.geometry?.firstMaterial?.diffuse.contents = NSColor.controlAccentColor
-        s.rootNode.addChildNode(sourceNode)
+        // six speaker markers
+        for color in SceneRigView.speakerColors {
+            let node = SCNNode(geometry: SCNSphere(radius: 0.13))
+            node.geometry?.firstMaterial?.diffuse.contents = color
+            s.rootNode.addChildNode(node)
+            speakerNodes.append(node)
+        }
 
         // a faint ground grid plane for orientation
         let floor = SCNNode(geometry: SCNFloor())
@@ -39,13 +53,16 @@ final class Scene3DView: SCNView {
 
         let camera = SCNNode()
         camera.camera = SCNCamera()
-        camera.position = SCNVector3(0, 2.5, 6)
+        camera.position = SCNVector3(0, 3, 6)
         camera.look(at: SCNVector3(0, 0, 0))
         s.rootNode.addChildNode(camera)
     }
 
-    /// Move the source marker (metres; listener at origin, -z is in front).
-    func updateSource(x: Double, y: Double, z: Double) {
-        sourceNode.position = SCNVector3(CGFloat(x), CGFloat(y), CGFloat(z))
+    /// Move the speaker markers to the given positions (metres), order [FL, FR, C, LFE, RL, RR].
+    func update(positions: [(Double, Double, Double)]) {
+        for (i, node) in speakerNodes.enumerated() where i < positions.count {
+            let p = positions[i]
+            node.position = SCNVector3(CGFloat(p.0), CGFloat(p.1), CGFloat(p.2))
+        }
     }
 }

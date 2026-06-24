@@ -49,6 +49,43 @@ namespace foo_out_avf
         AVFEngine engine;
         bool is_active;
         bool is_paused;
+        double m_buffer_length = 0.0;           // foobar's configured output buffer length (seconds)
+        unsigned long long m_seen_mode_gen = 0; // last v3d_config mode generation we acted on
+
+        // setMode recreates the backend, so the log callback must be (re)installed on the new one or
+        // its [AVF]/[V3D] lines fall back to NSLog instead of foobar's console. Configure mode first.
+        void configure_engine_for_mode(OutputMode mode) {
+            engine.setMode(mode);
+            // Engine logs can originate on foobar's realtime feed thread; console::print dispatches to
+            // its receivers synchronously (UI marshaling) and could stall it. Hand each line to the
+            // main thread via fb2k::inMainThread() — it queues and returns immediately.
+            engine.setLogCallback([](const char *message) {
+                fb2k::inMainThread([line = std::string(message)]() { FB2K_console_print(line.c_str()); });
+            });
+            // foobar's configured buffer length is the steady-state lead; too small underruns AVF.
+            engine.setBufferLength(m_buffer_length);
+        }
+
+        // An output instance is long-lived, so it would never re-read the mode after the user toggles
+        // Virtual 3D in preferences. Watch the mode generation and rebuild the engine for the new
+        // backend in place (a brief gap — this is a deliberate switch). Called from update().
+        void maybe_switch_mode() {
+            const unsigned long long gen = v3d_config::mode_generation();
+            if (gen == m_seen_mode_gen) {
+                return;
+            }
+            m_seen_mode_gen = gen;
+            const OutputMode want = v3d_config::mode();
+            if (want == engine.mode()) {
+                return;
+            }
+            engine.disable();
+            configure_engine_for_mode(want);
+            is_active = engine.enable();
+            if (is_active && is_paused) {
+                engine.pause(); // preserve the paused state across the rebuild
+            }
+        }
 
     public:
         static constexpr GUID class_guid = guid_output_avfoundation;
@@ -66,20 +103,10 @@ namespace foo_out_avf
 
     public:
         AVFOutput(const GUID &p_device, double p_buffer_length, bool p_dither, t_uint32 p_bitdepth) : is_active(false), is_paused(false) {
-
-            // Engine logs can originate on foobar's realtime feed thread. console::print is
-            // thread-safe but dispatches to its receivers synchronously (UI marshaling), which
-            // can stall that thread and glitch playback. Hand the line to the main thread via
-            // fb2k::inMainThread() — it queues and returns immediately (SDK threadsLite.h).
-            // Pick the spatialization backend (system Spatial Audio vs V3D) from saved config
-            // BEFORE configuring it — setMode recreates the backend, so do it first.
-            engine.setMode(v3d_config::mode());
-            engine.setLogCallback([](const char *message) {
-                fb2k::inMainThread([line = std::string(message)]() { FB2K_console_print(line.c_str()); });
-            });
-            // Keep foobar's configured buffer length worth of audio enqueued in the renderer
-            // (the steady-state lead). Too small a lead underruns AVF between refills.
-            engine.setBufferLength(p_buffer_length);
+            m_buffer_length = p_buffer_length;
+            // Pick the spatialization backend (system Spatial Audio vs V3D) from saved config.
+            configure_engine_for_mode(v3d_config::mode());
+            m_seen_mode_gen = v3d_config::mode_generation();
 
             if (engine.enable()) {
                 is_active = true;
@@ -158,6 +185,7 @@ namespace foo_out_avf
 
         void update(bool &p_ready) override {
             CallTimerHelper _t("update");
+            maybe_switch_mode(); // pick up a Virtual 3D on/off toggle made in preferences, live
             // We are a shallow sink: ready iff there's room under the target lead.
             p_ready = is_active && engine.canAcceptMore();
         }
@@ -166,6 +194,7 @@ namespace foo_out_avf
         //! offer a right-sized chunk instead of over-offering and getting a partial take.
         size_t update_v2() override {
             CallTimerHelper _t("update_v2");
+            maybe_switch_mode(); // pick up a Virtual 3D on/off toggle made in preferences, live
             return is_active ? engine.freeSampleCount() : 0;
         }
 
