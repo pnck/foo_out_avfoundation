@@ -1,0 +1,23 @@
+//
+//  engine_virtual_surround.h
+//  foo_out_avfoundation
+//
+//  VSurround positional backend (declaration). AVAudioEngine + AVAudioSourceNode + AVAudioEnvironmentNode,
+//  rendering in-process with HRTFHQ so the user can place the source at a custom point in a virtual
+//  field — the path the system spatializer (engine_sys_spatialized.mm) cannot offer. Selected when the
+//  engine's OutputMode is VirtualSurround. Implementation + design notes in engine_virtual_surround.mm.
+//
+
+#pragma once
+
+#import "engine.h"
+
+#ifdef __OBJC__
+@interface AVFVirtualSurroundBackend : NSObject <AVFOutputBackend>
+- (instancetype)init;
+// Re-declared from AVFOutputBackend so they auto-synthesize here (see engine.h).
+@property(nonatomic, readonly, getter=isEnabled) bool isEnabled;
+@property(nonatomic, readonly, getter=isPaused) bool isPaused;
+@property(nonatomic, readonly, getter=isProgressing) bool isProgressing;
+@end
+#endif // __OBJC__

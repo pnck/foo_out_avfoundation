@@ -18,6 +18,18 @@ on foobar's single playback thread; there are no AVF callbacks, no staging queue
 
 ## Hard rules (regressing any of these reintroduces a specific past bug)
 
+- **🚫 NEVER copy-paste logic between files. Shared code lives in exactly ONE place
+  (`src/common/…`) and both sites include it.** This rule is absolute because copy-paste is a
+  recurring LLM failure mode and a genuine source of big bugs: duplicating a helper "to avoid
+  touching the other file" silently creates two copies that *drift* — a later edit fixes/changes one
+  and leaves the other subtly wrong, and nothing flags it. If the same function / constant / struct /
+  block is needed in two TUs, **extract it** (an `inline` function or `inline constexpr`/`inline`
+  variable in a header so there's a single definition), don't replicate it. Applies to helpers,
+  policy constants, channel maps, geometry, everything. Already bitten once: the output-lead policy
+  (`fsec`, `currentOutputFloor`, the device-transport floors, the device-change address) was
+  copy-pasted into both `engine_sys_spatialized.mm` and `engine_virtual_3d.mm` and had already begun
+  to drift in comments/values before being consolidated into `common/lead.h`. If you catch
+  yourself pasting, stop and extract instead.
 - **Take partial, return the count; don't forward everything in one go.**
   `process_samples_v2` takes at most `freeFramesAtRate:` and returns that count; foobar holds
   the rest. (This is why there is no `sampleQueue` / staging — partial consumption makes

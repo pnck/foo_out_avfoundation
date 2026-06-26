@@ -16,18 +16,19 @@
 #import <AVFAudio/AVFAudio.h>
 #import <CoreAudio/CoreAudioTypes.h>
 
-@interface AVFEngineImpl : NSObject
+// The output-backend surface shared by every AVFoundation backend. The C++ facade (engine.mm)
+// holds an id<AVFOutputBackend> and picks the concrete backend by OutputMode:
+//   - AVFSysSpatializedBackend          (engine_sys_spatialized.mm)  — system Spatial Audio path (default)
+//   - AVFVirtualSurroundBackend  (engine_virtual_surround.mm)   — in-process HRTFHQ positional path (VSurround)
+@protocol AVFOutputBackend <NSObject>
 
-- (instancetype)init;
-- (void)dealloc;
-
-// Audio format setup - must be called before enable
+// Audio format setup — must be called before enable.
 - (bool)setupAudioFormat:(uint32_t)sampleRate channels:(uint32_t)channels;
 
-// Push side (foobar2000's process_samples_v2). Shallow sink: we decide how many of the offered
-// frames to take (under the target lead), allocate the destination block, and call
-// `convert(dst, frames)` to write that many interleaved float frames straight into it (single
-// copy). Returns frames actually taken; foobar keeps the remainder. See README.md.
+// Push side (foobar2000's process_samples_v2). Shallow sink: the backend decides how many of the
+// offered frames to take (under its target lead), allocates the destination, and calls
+// `convert(dst, frames)` to write that many interleaved float frames straight in (single copy).
+// Returns frames actually taken; foobar keeps the remainder. See docs/memo.md.
 - (size_t)feedAudioData:(uint32_t)sampleRate
                channels:(uint32_t)channels
              frameCount:(size_t)frameCount
@@ -38,33 +39,28 @@
 - (void)resume;
 - (void)forcePlay;
 
-// Audio interface status management
 - (bool)enable;
 - (void)disable;
 
-// foobar2000's configured output buffer length (seconds) — the steady-state lead we keep
-// enqueued in the renderer. Call before enable.
+// foobar2000's configured output buffer length (seconds). Call before enable.
 - (void)setBufferLength:(double)seconds;
 
-// Backpressure for foobar's update()/update_v2(): can we accept more right now, and roughly
-// how many frames (advisory) before we hit the target lead.
+// Backpressure for foobar's update()/update_v2().
 - (bool)canAcceptMore;
 - (size_t)freeSampleCount;
 
-// Volume control
 - (void)setVolume:(float)volume;
 - (float)getVolume;
 
-// Spatial audio control
+// Spatial positioning. The default backend keeps these as informational no-ops (the system
+// spatializer owns placement); the VSurround backend wires them straight into the HRTFHQ renderer.
 - (void)setListenerPosition:(float)x y:(float)y z:(float)z;
 - (void)setListenerOrientation:(float)yaw pitch:(float)pitch roll:(float)roll;
 - (void)setSourcePosition:(float)x y:(float)y z:(float)z;
 
-// Latency calculation (our queued seconds = lead ahead of the play head)
 - (double)getCurrentLatency;
 
-// Logging bridge for foobar2000 console
-- (void)setLogCallback:(void (*)(const char *))callback; // Pass nullptr to fallback to NSLog
+- (void)setLogCallback:(void (*)(const char *))callback; // Pass nullptr to fall back to NSLog
 
 @property(nonatomic, readonly, getter=isEnabled) bool isEnabled;
 @property(nonatomic, readonly, getter=isPaused) bool isPaused;
@@ -72,20 +68,42 @@
 @property(nonatomic, readonly, getter=isProgressing) bool isProgressing;
 
 @end
+
+// Default backend: AVSampleBufferAudioRenderer + AVSampleBufferRenderSynchronizer (system Spatial
+// Audio). Implementation in engine_sys_spatialized.mm — unchanged from the original single-engine design.
+@interface AVFSysSpatializedBackend : NSObject <AVFOutputBackend>
+- (instancetype)init;
+// Re-declared from AVFOutputBackend so they auto-synthesize their backing ivars/getters here
+// (protocol-declared properties are not auto-synthesized in the adopting class).
+@property(nonatomic, readonly, getter=isEnabled) bool isEnabled;
+@property(nonatomic, readonly, getter=isPaused) bool isPaused;
+@property(nonatomic, readonly, getter=isProgressing) bool isProgressing;
+@end
 #endif // __OBJC__
 
 // C++ interface
 namespace foo_out_avf
 {
 
+    // Which spatialization path the engine drives. Selected from config before enable().
+    enum class OutputMode {
+        SystemSpatial = 0, // AVSampleBufferAudioRenderer -> macOS system Spatial Audio (default)
+        VirtualSurround = 1,     // AVAudioEngine + AVAudioEnvironmentNode (HRTFHQ) -> custom positioning
+    };
+
     class AVFEngine {
     public:
-        AVFEngine();
+        explicit AVFEngine(OutputMode mode = OutputMode::SystemSpatial);
         ~AVFEngine();
 
         // Prevent copying
         AVFEngine(const AVFEngine &) = delete;
         AVFEngine &operator=(const AVFEngine &) = delete;
+
+        // Select the backend. Call BEFORE enable(); recreates the backend if the mode changed.
+        // Switching while playing is not supported — the output is rebuilt on a mode change.
+        void setMode(OutputMode mode);
+        OutputMode mode() const;
 
         // Audio format setup - must be called before enable
         bool setupAudioFormat(double sampleRate, int channels);
@@ -129,8 +147,8 @@ namespace foo_out_avf
         void setLogCallback(void (*callback)(const char *message)); // Pass nullptr to fallback to NSLog
 
     private:
-        // Opaque pointer to hide Objective-C implementation
-        void *impl_ = nullptr;
+        void *impl_ = nullptr; // id<AVFOutputBackend> (bridged-retained)
+        OutputMode mode_ = OutputMode::SystemSpatial;
     };
 
 } // namespace foo_out_avf

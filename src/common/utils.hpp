@@ -4,8 +4,12 @@
 
 namespace utils
 {
-#if defined(__aarch64__) || defined(__arm64ec__)
-    void neon_convert(const double *input, float *output, size_t count) {
+// float64 NEON convert (double -> float). Gated on AUDIO_MATH_NEON_FLOAT64 — the SAME macro predef.h
+// uses to decide the f64 NEON intrinsics are available (arm64, non-Android) — so the definition and
+// the call site can never disagree. `inline` so this header may be included by more than one TU
+// without a duplicate-symbol link error (these are free functions with external linkage otherwise).
+#if defined(AUDIO_MATH_NEON_FLOAT64)
+    inline void neon_convert(const double *input, float *output, size_t count) {
         const double *src = input;
         float *dst = output;
         size_t n = count / 16;
@@ -32,7 +36,7 @@ namespace utils
             dst[i] = (float)src[i];
         }
     }
-    void neon_convert(const float *input, float *output, size_t count) {
+    inline void neon_convert(const float *input, float *output, size_t count) {
         memcpy(output, input, count * sizeof(float));
     }
 #endif

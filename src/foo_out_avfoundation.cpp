@@ -9,6 +9,7 @@
 #include "common/consts.hpp"
 #include "common/utils.hpp"
 #include "engine.h"
+#include "vsurround_config.h"
 #include <vector>
 #include <span>
 #include <chrono>
@@ -48,6 +49,55 @@ namespace foo_out_avf
         AVFEngine engine;
         bool is_active;
         bool is_paused;
+        double m_buffer_length = 0.0;           // foobar's configured output buffer length (seconds)
+        unsigned long long m_seen_mode_gen = 0; // last vsurround_config mode generation we acted on
+
+        // setMode recreates the backend, so the log callback and buffer length must be (re)installed on
+        // the new one (else the logs fall back to NSLog instead of foobar's console). Volume is NOT
+        // re-applied here: foobar owns it and the backend itself stores the last value, so a mode switch
+        // carries it across in maybe_switch_mode rather than us caching a second copy. Configure mode first.
+        void configure_engine_for_mode(OutputMode mode) {
+            engine.setMode(mode);
+            // Engine logs can originate on foobar's realtime feed thread; console::print dispatches to
+            // its receivers synchronously (UI marshaling) and could stall it. Hand each line to the
+            // main thread via fb2k::inMainThread() — it queues and returns immediately.
+            engine.setLogCallback([](const char *message) {
+                fb2k::inMainThread([line = std::string(message)]() { FB2K_console_print(line.c_str()); });
+            });
+            // foobar's configured buffer length is the steady-state lead; too small underruns AVF.
+            engine.setBufferLength(m_buffer_length);
+        }
+
+        // An output instance is long-lived, so it would never re-read the mode after the user toggles
+        // Virtual Surround in preferences. Watch the mode generation and rebuild the engine for the new
+        // backend in place (a brief gap — this is a deliberate switch). Called from update().
+        void maybe_switch_mode() {
+            const unsigned long long gen = vsurround_config::mode_generation();
+            if (gen == m_seen_mode_gen) {
+                return;
+            }
+            m_seen_mode_gen = gen;
+            const OutputMode want = vsurround_config::mode();
+            if (want == engine.mode()) {
+                return;
+            }
+            // foobar owns the volume but won't re-push it on our internal backend swap, so carry the
+            // value the old backend currently holds across the rebuild (no separate cached copy).
+            const float volume = engine.getVolume();
+            engine.disable();
+            configure_engine_for_mode(want);
+            engine.setVolume(volume);
+            is_active = engine.enable();
+            if (is_active && is_paused) {
+                engine.pause(); // preserve the paused state across the rebuild
+            }
+            if (!is_active) {
+                // The new backend wouldn't start. We've already consumed the generation, so we won't spin
+                // retrying on the playback thread — but surface it (otherwise it's a silent dead output until
+                // the user toggles the mode again, which bumps the generation and re-attempts the switch).
+                fb2k::inMainThread([]() { FB2K_console_print("[AVF] mode switch failed: new backend did not enable"); });
+            }
+        }
 
     public:
         static constexpr GUID class_guid = guid_output_avfoundation;
@@ -65,17 +115,10 @@ namespace foo_out_avf
 
     public:
         AVFOutput(const GUID &p_device, double p_buffer_length, bool p_dither, t_uint32 p_bitdepth) : is_active(false), is_paused(false) {
-
-            // Engine logs can originate on foobar's realtime feed thread. console::print is
-            // thread-safe but dispatches to its receivers synchronously (UI marshaling), which
-            // can stall that thread and glitch playback. Hand the line to the main thread via
-            // fb2k::inMainThread() — it queues and returns immediately (SDK threadsLite.h).
-            engine.setLogCallback([](const char *message) {
-                fb2k::inMainThread([line = std::string(message)]() { FB2K_console_print(line.c_str()); });
-            });
-            // Keep foobar's configured buffer length worth of audio enqueued in the renderer
-            // (the steady-state lead). Too small a lead underruns AVF between refills.
-            engine.setBufferLength(p_buffer_length);
+            m_buffer_length = p_buffer_length;
+            // Pick the spatialization backend (system Spatial Audio vs VSurround) from saved config.
+            configure_engine_for_mode(vsurround_config::mode());
+            m_seen_mode_gen = vsurround_config::mode_generation();
 
             if (engine.enable()) {
                 is_active = true;
@@ -84,7 +127,6 @@ namespace foo_out_avf
 
         ~AVFOutput() {
             if (is_active) {
-                // engine.setLogCallback(nullptr);
                 engine.disable();
             }
         }
@@ -131,7 +173,9 @@ namespace foo_out_avf
             return engine.feedAudioData(sample_rate, channels, sample_count,
                                         [input_data, channels](float *dst, size_t frames) {
                                             const size_t count = frames * channels;
-#if defined(AUDIO_MATH_NEON)
+                                            // input_data is audio_sample (double); use the f64 NEON
+                                            // path only where it's actually defined (same macro).
+#if defined(AUDIO_MATH_NEON_FLOAT64)
                                             utils::neon_convert(input_data, dst, count);
 #else
                                             fb2k_audio_math::convert(input_data, dst, count);
@@ -154,6 +198,7 @@ namespace foo_out_avf
 
         void update(bool &p_ready) override {
             CallTimerHelper _t("update");
+            maybe_switch_mode(); // pick up a Virtual Surround on/off toggle made in preferences, live
             // We are a shallow sink: ready iff there's room under the target lead.
             p_ready = is_active && engine.canAcceptMore();
         }
@@ -162,6 +207,7 @@ namespace foo_out_avf
         //! offer a right-sized chunk instead of over-offering and getting a partial take.
         size_t update_v2() override {
             CallTimerHelper _t("update_v2");
+            maybe_switch_mode(); // pick up a Virtual Surround on/off toggle made in preferences, live
             return is_active ? engine.freeSampleCount() : 0;
         }
 
@@ -192,9 +238,10 @@ namespace foo_out_avf
         }
 
         void volume_set(double p_val) override {
-            // Pass foobar2000's value straight through to the renderer's linear gain —
-            // linear to linear, no curve/dB conversion. We don't assume how foobar maps
-            // its slider; whatever value it sends is applied verbatim.
+            // Pass foobar2000's value straight through to the renderer's linear gain — linear to
+            // linear, no curve/dB conversion. We don't assume how foobar maps its slider; whatever
+            // value it sends is applied verbatim. foobar is the authority and the backend stores the
+            // applied value, so we keep no copy of our own (a live mode switch carries it across).
             engine.setVolume(static_cast<float>(p_val));
         }
     };
