@@ -23,8 +23,16 @@
 //  engine_sys_spatialized.mm — take only enough to top a target lead (partial consumption), prime a
 //  small lead before draining, batch (kMinFeed) so we never dribble, floor the lead by the output
 //  device's transport type — but here the "queue" is our rings and "start the clock" is the shared
-//  `primed` flag. The engine is stopped (which quiesces the render thread) before any graph/ring
-//  reconfiguration, so the only concurrent access is the steady-state SPSC rings — no locks.
+//  `primed` flag.
+//
+//  CONCURRENCY: the GRAPH topology and the rings are reconfigured only with the engine stopped (which
+//  quiesces the render thread), so ring buffers are a plain SPSC hand-off (atomics, no locks). The one
+//  exception is LIVE parameter updates: applyLayout sets each source's AVAudioMixing position/volume
+//  from the feed thread WHILE the engine runs (the preferences "drag to hear it move" path). Those
+//  setters are Apple's supported way to adjust a running mixer, so this is safe — but note it is a real
+//  feed-thread ⇄ render-thread interaction, not the "nothing concurrent but the rings" the rings alone
+//  would suggest. (Positions are not published as one atomic snapshot, so a single render quantum may
+//  observe a half-updated rig during a drag; inaudible for smooth edits.)
 //
 
 #import "engine_virtual_3d.h"
@@ -40,9 +48,13 @@
 #include <cmath>
 #include <cstring>
 
+#include "common/lead.h" // shared fsec / lead floors / currentOutputFloor — DO NOT copy-paste
+
 // This TU is not inside namespace foo_out_avf (the @implementation is ObjC), so alias the config
-// namespace to keep the v3d_config:: call sites short.
+// namespace to keep the v3d_config:: call sites short, and bring the shared lead-policy names
+// (fsec, kPrime, currentOutputFloor, kDefaultOutputDeviceAddr, …) into scope unqualified.
 namespace v3d_config = foo_out_avf::v3d_config;
+using namespace foo_out_avf::lead;
 
 #ifndef AVAudio3DPointMake
 #define AVAudio3DPointMake(x, y, z) \
@@ -59,46 +71,9 @@ namespace v3d_config = foo_out_avf::v3d_config;
 
 namespace
 {
-    using namespace std::chrono_literals;
-    using fsec = std::chrono::duration<double>;
-    static inline double ms(fsec s) { return std::chrono::duration<double, std::milli>(s).count(); }
-
-    // Same lead policy as the default backend (see engine_sys_spatialized.mm for the rationale).
-    constexpr fsec kPrime = 200ms;
-    constexpr fsec kBuiltinFloor = 200ms;  // built-in / wired
-    constexpr fsec kWirelessFloor = 500ms; // Bluetooth / AirPlay (also the safe default) — V3D is a
-                                           // headphone feature, so this route is the common one.
-    constexpr fsec kMinFeed = 20ms;
-
-    AudioObjectPropertyAddress kDefaultOutputDeviceAddr = {
-        kAudioHardwarePropertyDefaultOutputDevice,
-        kAudioObjectPropertyScopeGlobal,
-        kAudioObjectPropertyElementMain,
-    };
-
-    static fsec currentOutputFloor() {
-        AudioObjectID dev = kAudioObjectUnknown;
-        UInt32 size = sizeof(dev);
-        AudioObjectPropertyAddress addr = kDefaultOutputDeviceAddr;
-        if (AudioObjectGetPropertyData(kAudioObjectSystemObject, &addr, 0, NULL, &size, &dev) != noErr ||
-            dev == kAudioObjectUnknown) {
-            return kWirelessFloor;
-        }
-        UInt32 transport = 0;
-        size = sizeof(transport);
-        addr.mSelector = kAudioDevicePropertyTransportType;
-        if (AudioObjectGetPropertyData(dev, &addr, 0, NULL, &size, &transport) != noErr) {
-            return kWirelessFloor;
-        }
-        switch (transport) {
-        case kAudioDeviceTransportTypeBluetooth:
-        case kAudioDeviceTransportTypeBluetoothLE:
-        case kAudioDeviceTransportTypeAirPlay:
-            return kWirelessFloor;
-        default:
-            return kBuiltinFloor;
-        }
-    }
+    // The lead policy (fsec, ms, the floors, kDefaultOutputDeviceAddr, currentOutputFloor) is shared
+    // with engine_sys_spatialized.mm via common/lead.h (in scope through the using-directive
+    // above) — NOT copy-pasted. Only V3D-specific helpers live here.
 
     static size_t nextPow2(size_t n) {
         size_t p = 1;
@@ -150,6 +125,30 @@ namespace
             case 4: return pointFromVec(s.rl);
             case 5: return pointFromVec(s.rr);
             default: return pointFromVec((idx % 2) ? s.rr : s.rl);
+            }
+        }
+    }
+
+    // The per-group gain (dB) for a given channel, mirroring speakerForChannel's channel→speaker map.
+    static double gainDbForChannel(const v3d_config::Layout &L, uint32_t count, uint32_t idx) {
+        switch (count) {
+        case 1:
+            return L.centerGainDb;
+        case 2:
+            return L.frontGainDb;
+        case 3:
+            return (idx < 2) ? L.frontGainDb : L.centerGainDb;
+        case 4:
+            return (idx < 2) ? L.frontGainDb : L.rearGainDb;
+        case 5:
+            return (idx < 2) ? L.frontGainDb : (idx == 2 ? L.centerGainDb : L.rearGainDb);
+        default: // 6 (5.1) and larger: FL FR C LFE RL RR …
+            switch (idx) {
+            case 0:
+            case 1: return L.frontGainDb;
+            case 2: return L.centerGainDb;
+            case 3: return L.lfeGainDb;
+            default: return L.rearGainDb;
             }
         }
     }
@@ -208,10 +207,14 @@ static OSStatus v3d_default_output_changed(AudioObjectID inObjectID, UInt32 inNu
 
     unsigned long long _seenLayoutGen; // last v3d_config layout generation we applied (live pick-up gate)
     uint32_t _channelCount;            // number of content channels = number of sources/rings
+    bool _engineFailed;                // AVAudioEngine wouldn't start/build — stop feeding, surface it
 
     fsec _configured;
     std::atomic<fsec> _deviceFloor;
     std::vector<float> _feedStaging; // producer-only scratch for the interleaved input chunk
+    std::vector<float> _channelGain; // per-source linear gain, applied in the feed (not via mix.volume,
+                                     // which clamps near unity; written by applyLayout, read by the feed —
+                                     // both on the playback thread)
 
     uint64_t _diagFeed;
 
@@ -231,6 +234,7 @@ static OSStatus v3d_default_output_changed(AudioObjectID inObjectID, UInt32 inNu
     _configured = fsec(0);
     _deviceFloor.store(currentOutputFloor());
     _channelCount = 0;
+    _engineFailed = false;
     _seenLayoutGen = 0;
     _diagFeed = 0;
     _isEnabled = false;
@@ -248,6 +252,11 @@ static OSStatus v3d_default_output_changed(AudioObjectID inObjectID, UInt32 inNu
     if (@available(macOS 12.0, *)) {
         _env.outputType = AVAudioEnvironmentOutputTypeHeadphones;
     }
+    // Disable the automatic distance attenuation. By default the environment node attenuates by
+    // distance (inverse model, ~-6 dB per doubling), so a speaker placed far away goes quiet on its
+    // own and fights the user's gain. Pushing referenceDistance past any placement we allow means no
+    // distance attenuation: position drives DIRECTION (HRTF), the per-group gain drives LEVEL.
+    _env.distanceAttenuationParameters.referenceDistance = 100000.0f;
     _env.listenerPosition = _listenerPosition;
     _env.listenerAngularOrientation = _listenerOrientation;
 
@@ -325,12 +334,14 @@ static OSStatus v3d_default_output_changed(AudioObjectID inObjectID, UInt32 inNu
 }
 
 // Apply the current speaker layout to the live source nodes. AVAudioSourceNode adopts AVAudioMixing
-// (hence AVAudio3DMixing) once connected to the environment; guard each setter with respondsToSelector
+// (volume + 3D position) once connected to the environment; guard each setter with respondsToSelector
 // so an older macOS that lacks a knob degrades gracefully instead of throwing.
 - (void)applyLayout {
-    const v3d_config::SpeakerPositions speakers = v3d_config::compute_speakers(v3d_config::layout());
+    const v3d_config::Layout layout = v3d_config::layout();
+    const v3d_config::SpeakerPositions speakers = v3d_config::compute_speakers(layout);
+    _channelGain.assign(_channelCount, 1.0f);
     for (uint32_t c = 0; c < _channelCount && c < _sources.count; ++c) {
-        id<AVAudio3DMixing> mix = (id<AVAudio3DMixing>)_sources[c];
+        id<AVAudioMixing> mix = (id<AVAudioMixing>)_sources[c];
         if ([mix respondsToSelector:@selector(setRenderingAlgorithm:)]) {
             mix.renderingAlgorithm = AVAudio3DMixingRenderingAlgorithmHRTFHQ; // HRTFHQ only (old HRTF dropped)
         }
@@ -342,6 +353,10 @@ static OSStatus v3d_default_output_changed(AudioObjectID inObjectID, UInt32 inNu
         if ([mix respondsToSelector:@selector(setPosition:)]) {
             mix.position = speakerForChannel(speakers, _channelCount, c);
         }
+        if ([mix respondsToSelector:@selector(setVolume:)]) {
+            mix.volume = 1.0f; // gain is applied to the samples in the feed (mix.volume clamps near unity)
+        }
+        _channelGain[c] = (float)std::pow(10.0, gainDbForChannel(layout, _channelCount, c) / 20.0);
     }
     _seenLayoutGen = v3d_config::layout_generation();
 }
@@ -399,7 +414,10 @@ static OSStatus v3d_default_output_changed(AudioObjectID inObjectID, UInt32 inNu
                                      AVAudioFrameCount frameCount, AudioBufferList *outputData) {
                    (void)timestamp;
                    float *out = (float *)outputData->mBuffers[0].mData;
-                   const size_t need = (size_t)frameCount; // mono → samples == frames
+                   // Honour the output buffer's real capacity, not just frameCount, so an unexpected
+                   // oversized request can never overflow it.
+                   const size_t cap = outputData->mBuffers[0].mDataByteSize / sizeof(float);
+                   const size_t need = std::min((size_t)frameCount, cap); // mono → samples == frames
 
                    if (ring->capacity == 0 || !shared->primed.load(std::memory_order_acquire) ||
                        shared->paused.load(std::memory_order_acquire)) {
@@ -478,12 +496,17 @@ static OSStatus v3d_default_output_changed(AudioObjectID inObjectID, UInt32 inNu
     @try {
         NSError *err = nil;
         if (![_engine startAndReturnError:&err]) {
-            V3D_DIAG(@"[V3D] engine start failed: %@", err ?: @"(nil)");
+            // Log unconditionally (not the Debug-only macro): a start failure otherwise becomes an
+            // indefinite SILENT stall (rings fill, backpressure goes 0, foobar stops feeding, no audio).
+            [self logMessage:@"[V3D] engine start FAILED: %@", err ?: @"(nil)"];
+            _engineFailed = true;
         } else {
+            _engineFailed = false;
             V3D_DIAG(@"[V3D] engine started (%u ch @ %u Hz)", _channelCount, _shared->sampleRate);
         }
     } @catch (NSException *ex) {
-        V3D_DIAG(@"[V3D] engine start EXCEPTION: %@ — %@", ex.name, ex.reason ?: @"(nil)");
+        [self logMessage:@"[V3D] engine start EXCEPTION: %@ — %@", ex.name, ex.reason ?: @"(nil)"];
+        _engineFailed = true;
     }
 }
 
@@ -594,9 +617,10 @@ static OSStatus v3d_default_output_changed(AudioObjectID inObjectID, UInt32 inNu
     const size_t nch = std::min<size_t>(channels, _rings.size());
     for (size_t c = 0; c < nch; ++c) {
         V3DChannelRing *r = _rings[c];
+        const float gain = (c < _channelGain.size()) ? _channelGain[c] : 1.0f; // per-group gain, in samples
         const size_t w = r->write.load(std::memory_order_relaxed);
         for (size_t i = 0; i < take; ++i) {
-            r->buf[(w + i) & r->mask] = in[i * channels + c];
+            r->buf[(w + i) & r->mask] = in[i * channels + c] * gain;
         }
         r->write.store(w + take, std::memory_order_release);
     }
@@ -636,7 +660,7 @@ static OSStatus v3d_default_output_changed(AudioObjectID inObjectID, UInt32 inNu
 // --- backpressure for foobar's update() / update_v2() ----------------------
 
 - (bool)canAcceptMore {
-    if (!_isEnabled || _isPaused) {
+    if (!_isEnabled || _isPaused || _engineFailed) {
         return false;
     }
     return [self lead] < [self targetLead];
@@ -645,6 +669,9 @@ static OSStatus v3d_default_output_changed(AudioObjectID inObjectID, UInt32 inNu
 - (size_t)freeSampleCount {
     if (!_isEnabled || _isPaused) {
         return 0;
+    }
+    if (_engineFailed) {
+        return 0; // engine won't run — stop foobar from feeding into a dead graph (no silent stall)
     }
     // Format not established yet: report "can take, amount unknown" (like the default backend) so
     // foobar feeds the first chunk — which is what creates the graph. Returning 0 here would deadlock

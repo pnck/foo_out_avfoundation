@@ -8,7 +8,10 @@
 //  from the preferences UI without an observer/notification dance:
 //    UI edit -> set_layout() (persist + bump generation) ; engine feed loop watches layout_generation()
 //    and re-applies when it changes. The cache is the read source (configStore is only touched on first
-//    load and on writes, both under one mutex), so the audio thread never races the UI on configStore.
+//    load and on writes, both under one mutex), so the audio thread never races the UI on configStore
+//    *for the layout*. NOTE: mode() / set_mode() are the exception — they hit configStore directly (no
+//    cache); that's safe only because maybe_switch_mode() gates on the atomic mode generation first, so
+//    the playback thread reads mode() at most once per actual toggle. configStore is itself thread-safe.
 //
 //  Read from C++ (the engine) directly, and from the Swift UI via the V3DConfig Objective-C bridge.
 //
@@ -35,12 +38,18 @@ namespace foo_out_avf
             double centerElDeg;
         };
 
-        // The whole rig: a front pair + a rear pair, plus a freely-placed mono centre and LFE.
+        // The whole rig: a front pair + a rear pair, plus a freely-placed mono centre and LFE, with a
+        // per-group gain (dB; 0 = unity) so the user can compensate for the distance attenuation that
+        // makes far speakers quiet. Gains map to each source node's mixer volume, not its position.
         struct Layout {
             SpeakerPair front;
             SpeakerPair rear;
             Vec3 center;
             Vec3 lfe;
+            double frontGainDb;
+            double rearGainDb;
+            double centerGainDb;
+            double lfeGainDb;
         };
 
         // The six virtual speaker positions in metres (listener at origin; front = -z, right = +x,
@@ -62,12 +71,23 @@ namespace foo_out_avf
         OutputMode mode();
         void set_mode(OutputMode m);
 
-        // The live layout: cached in memory, persisted to configStore. set_layout bumps the generation.
+        // The live layout. Returns the PREVIEW layout if one is active (see set_preview), otherwise the
+        // saved layout (cached in memory, loaded from configStore on first read).
         Layout layout();
+
+        // Commit a layout: update the cache, persist to configStore, and clear any active preview.
+        // Bumps the generation.
         void set_layout(const Layout &l);
 
-        // Monotonic counter, bumped on every set_layout. The engine compares it cheaply each feed and
-        // re-applies the layout only when it changes.
+        // Live preview (the preferences "drag to hear it move" path): the engine uses this layout
+        // immediately WITHOUT persisting it. set_preview installs/updates it; clear_preview drops it so
+        // layout() falls back to the saved one (i.e. leaving the page unsaved reverts). Both bump the
+        // generation so the running engine repositions. set_layout (Save) clears it as part of committing.
+        void set_preview(const Layout &l);
+        void clear_preview();
+
+        // Monotonic counter, bumped on every set_layout / set_preview / clear_preview. The engine
+        // compares it cheaply each feed and re-applies the layout only when it changes.
         unsigned long long layout_generation();
 
         // Monotonic counter, bumped on every set_mode. The output (AVFOutput) watches it and rebuilds

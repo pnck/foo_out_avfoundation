@@ -22,6 +22,7 @@
 #import <AVFoundation/AVFoundation.h>
 #import <CoreMedia/CoreMedia.h>
 #import <CoreAudio/CoreAudio.h>
+#include "common/lead.h" // shared fsec / lead floors / currentOutputFloor — DO NOT copy-paste
 #include <vector>
 #include <algorithm>
 #include <functional>
@@ -46,71 +47,10 @@
 #define AVF_DIAG(...) [self logMessage:__VA_ARGS__]
 #endif
 
-namespace
-{
-    using namespace std::chrono_literals;
-    // A duration in floating-point seconds — our currency for everything time-valued. Beats a
-    // bare double because the unit is in the type (no "is this seconds or ms?" guessing), and it
-    // converts to/from the SDK boundaries (foobar's double seconds, CMTime, frame counts) with an
-    // explicit, named cast at exactly one place each.
-    using fsec = std::chrono::duration<double>;
-    // Display helper: a duration's value in milliseconds, for the [AVF] log lines.
-    static inline double ms(fsec s) { return std::chrono::duration<double, std::milli>(s).count(); }
-
-    // We don't wait for the whole buffer before starting — bank just this much, start the clock,
-    // then keep filling up to the full lead while playing. Keeps startup snappy without losing the
-    // deep steady-state buffer.
-    constexpr fsec kPrime = 200ms;
-    // Floor on the lead, chosen by the system output device's transport type (queried from the
-    // CoreAudio HAL and refreshed on the default-device-changed notification). Wireless routes
-    // (Bluetooth / AirPlay) have far higher, burstier latency than the built-in DAC, so they need
-    // a deeper lead to avoid underruns; built-in can stay tighter for lower latency.
-    constexpr fsec kBuiltinFloor = 200ms;  // built-in / wired
-    constexpr fsec kWirelessFloor = 500ms; // Bluetooth / AirPlay (also the safe default)
-    // Minimum batch we accept in one go. Without this we top the lead up one or two SAMPLES at a
-    // time (foobar polls faster than the renderer drains), enqueueing a flood of ~1-sample
-    // CMSampleBuffers that thrash AVFoundation's AudioQueue timeline ("Resyncing AQ timeline" +
-    // AudioQueueFlush) no matter how big the buffer is. Waiting for a whole batch keeps buffers sane.
-    constexpr fsec kMinFeed = 20ms;
-
-    // Lead floor for the CURRENT system default output device, by transport type (CoreAudio HAL).
-    // Wireless (Bluetooth / BluetoothLE / AirPlay) → the deeper floor; everything else (built-in,
-    // USB, HDMI, …) → the tighter floor. On any query failure return the wireless (safe) floor.
-    static fsec currentOutputFloor() {
-        AudioObjectID dev = kAudioObjectUnknown;
-        UInt32 size = sizeof(dev);
-        AudioObjectPropertyAddress addr = {
-            kAudioHardwarePropertyDefaultOutputDevice,
-            kAudioObjectPropertyScopeGlobal,
-            kAudioObjectPropertyElementMain,
-        };
-        if (AudioObjectGetPropertyData(kAudioObjectSystemObject, &addr, 0, NULL, &size, &dev) != noErr ||
-            dev == kAudioObjectUnknown) {
-            return kWirelessFloor;
-        }
-        UInt32 transport = 0;
-        size = sizeof(transport);
-        addr.mSelector = kAudioDevicePropertyTransportType;
-        if (AudioObjectGetPropertyData(dev, &addr, 0, NULL, &size, &transport) != noErr) {
-            return kWirelessFloor;
-        }
-        switch (transport) {
-        case kAudioDeviceTransportTypeBluetooth:
-        case kAudioDeviceTransportTypeBluetoothLE:
-        case kAudioDeviceTransportTypeAirPlay:
-            return kWirelessFloor;
-        default:
-            return kBuiltinFloor;
-        }
-    }
-
-    // The CoreAudio property address we observe for output-device changes.
-    AudioObjectPropertyAddress kDefaultOutputDeviceAddr = {
-        kAudioHardwarePropertyDefaultOutputDevice,
-        kAudioObjectPropertyScopeGlobal,
-        kAudioObjectPropertyElementMain,
-    };
-} // namespace
+// The output-lead policy (fsec, the floors, currentOutputFloor, the device-change address) is shared
+// with engine_virtual_3d.mm via common/lead.h — bring its names into scope so the call sites
+// stay unqualified (fsec, kPrime, currentOutputFloor, kDefaultOutputDeviceAddr, …).
+using namespace foo_out_avf::lead;
 
 // Forward-declare the private methods used before their definitions (the C listener, and the fsec
 // helpers called from feed/gate above their @implementation point).
@@ -167,6 +107,7 @@ static OSStatus avf_default_output_changed(AudioObjectID inObjectID, UInt32 inNu
     bool _loggedRenderError; // one-shot: log the renderer's failure reason at most once per enable
 
     bool _isPaused;
+    bool _formatUnsupported; // stream's channel count has no usable AVAudioFormat — stop feeding
 
     struct VENV {
         AVAudio3DPoint listenerPosition;
@@ -217,6 +158,7 @@ static OSStatus avf_default_output_changed(AudioObjectID inObjectID, UInt32 inNu
     _diagUnderrun = 0;
     _diagWasReady = false;
     _loggedRenderError = false;
+    _formatUnsupported = false;
     _isEnabled = false;
     _isPaused = false;
     _logCallback = nullptr;
@@ -310,13 +252,28 @@ static OSStatus avf_default_output_changed(AudioObjectID inObjectID, UInt32 inNu
             asbd.mBytesPerFrame = asbd.mChannelsPerFrame * (asbd.mBitsPerChannel / 8);
             asbd.mFramesPerPacket = 1;
             asbd.mBytesPerPacket = asbd.mBytesPerFrame * asbd.mFramesPerPacket;
-            audioFormat = [[AVAudioFormat alloc] initWithStreamDescription:&asbd];
+            // >2 channels REQUIRE a channel layout, or AVAudioFormat returns nil. Left unhandled, setup
+            // then failed on every call and foobar busy-looped process_samples (100% CPU — the "5.1
+            // drags the whole player down" bug). Build the layout from foobar's OWN channel mask rather
+            // than guessing a CoreAudio tag: foobar's channel bits are the WAVEFORMATEXTENSIBLE order,
+            // which is exactly CoreAudio's AudioChannelBitmap, so channels can't be mis-mapped for any
+            // count (5.1, 6.1, 7.1, …) — and the canonical (ascending-bit) order matches the interleave.
+            AudioChannelLayout acl = {0};
+            acl.mChannelLayoutTag = kAudioChannelLayoutTag_UseChannelBitmap;
+            acl.mChannelBitmap = (AudioChannelBitmap)audio_chunk::g_guess_channel_config(channels);
+            AVAudioChannelLayout *layout = [[AVAudioChannelLayout alloc] initWithLayout:&acl];
+            audioFormat = layout ? [[AVAudioFormat alloc] initWithStreamDescription:&asbd channelLayout:layout]
+                                 : [[AVAudioFormat alloc] initWithStreamDescription:&asbd];
         }
 
         if (!audioFormat) {
-            AVF_DIAG(@"[AVF] Failed to create AVAudioFormat");
+            // Don't fail-loop: flag the stream unsupported so the backpressure methods tell foobar to
+            // stop offering (otherwise it re-calls process_samples forever at 100% CPU).
+            AVF_DIAG(@"[AVF] Unsupported format (%u ch @ %u Hz) — no channel layout", channels, sampleRate);
+            _formatUnsupported = true;
             return false;
         }
+        _formatUnsupported = false;
         currentFormat = audioFormat;
         return true;
     }
@@ -580,6 +537,9 @@ static OSStatus avf_default_output_changed(AudioObjectID inObjectID, UInt32 inNu
     if (!_isEnabled || _isPaused) {
         return false;
     }
+    if (_formatUnsupported) {
+        return false; // unsupported stream — don't invite more feeding (no busy loop)
+    }
     const bool ready = [self lead] < [self targetLead];
     // DIAGNOSTIC: log every gate flip. If we go FULL right after priming and foobar then
     // stalls feeding (a long gap before the next READY), that stall is what starves the
@@ -612,6 +572,9 @@ static OSStatus avf_default_output_changed(AudioObjectID inObjectID, UInt32 inNu
         return 0;
     }
     [self logRendererErrorIfFailed]; // catch failures even when feeding has stalled (foobar polls this)
+    if (_formatUnsupported) {
+        return 0; // unsupported stream — make foobar stop re-offering (otherwise 100% CPU busy loop)
+    }
     if (currentFormat == nil) {
         return SIZE_MAX; // can take, but no hint on how much until we know the format
     }

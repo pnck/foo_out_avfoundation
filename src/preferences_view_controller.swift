@@ -4,11 +4,13 @@
 //
 //  The component's preferences page for the virtual speaker rig. A mode switch, a top-down stage where
 //  you drag the front pair, rear pair, mono centre and LFE around the listener, sliders for the
-//  per-pair spacing/elevation and the mono speakers' height, and a live SceneKit preview of the rig.
+//  per-pair spacing/elevation, mono height, and per-group gain, plus a live SceneKit preview.
 //
-//  Edits are DEFERRED: they update the on-screen working layout + preview only. Nothing reaches the
-//  engine or configStore until "Save" is pressed (which commits the whole layout + the V3D switch in
-//  one shot). "Reset" loads the standard 5.1 layout into the editor (still needs Save to apply).
+//  Editing is a PREVIEW transaction: every edit updates the working layout, the on-screen preview, AND
+//  the running engine live (you hear the field move) — but nothing is persisted. Leaving the page
+//  without Save drops the preview, so the engine reverts to the saved layout. "Save" commits the whole
+//  layout + the Virtual 3D switch (the mode change applies on the next playback start). "Reset" loads
+//  the standard 5.1 layout into the editor.
 //
 //  @objc name is fixed; preferences_page.mm resolves the controller by it (NSClassFromString).
 //
@@ -27,6 +29,7 @@ final class V3DPreferencesViewController: NSViewController {
     private var rearDist = 2.0, rearSpacing = 140.0, rearAz = 180.0, rearEl = 0.0
     private var centerX = 0.0, centerY = 0.0, centerZ = -2.0
     private var lfeX = 0.0, lfeY = -0.4, lfeZ = -1.5
+    private var frontGainDb = 0.0, rearGainDb = 0.0, centerGainDb = 0.0, lfeGainDb = 0.0
 
     private let modeToggle = NSButton(checkboxWithTitle: "Enable Virtual 3D (custom speaker rig)",
                                       target: nil, action: nil)
@@ -37,26 +40,34 @@ final class V3DPreferencesViewController: NSViewController {
 
     private let frontSpacing_ = NSSlider()
     private let frontElevation_ = NSSlider()
+    private let frontGain_ = NSSlider()
     private let rearSpacing_ = NSSlider()
     private let rearElevation_ = NSSlider()
+    private let rearGain_ = NSSlider()
     private let centerHeight_ = NSSlider()
+    private let centerGain_ = NSSlider()
     private let lfeHeight_ = NSSlider()
+    private let lfeGain_ = NSSlider()
 
     private let frontSpacingValue = NSTextField(labelWithString: "")
     private let frontElevationValue = NSTextField(labelWithString: "")
+    private let frontGainValue = NSTextField(labelWithString: "")
     private let rearSpacingValue = NSTextField(labelWithString: "")
     private let rearElevationValue = NSTextField(labelWithString: "")
+    private let rearGainValue = NSTextField(labelWithString: "")
     private let centerHeightValue = NSTextField(labelWithString: "")
+    private let centerGainValue = NSTextField(labelWithString: "")
     private let lfeHeightValue = NSTextField(labelWithString: "")
+    private let lfeGainValue = NSTextField(labelWithString: "")
 
     private let hint = NSTextField(wrappingLabelWithString:
         "Drag the front/rear pair centres and the mono centre/LFE around the listener (top-down). "
-        + "Spacing/elevation are per-pair sliders; the mono speakers have a height slider. "
-        + "Nothing is applied until you press Save (this includes the Virtual 3D switch); the mode "
-        + "change takes effect when playback next starts. Reset loads the standard 5.1 layout.")
+        + "Spacing/elevation/gain are per-group sliders; gain offsets the distance attenuation on far "
+        + "speakers. Edits preview live on playback; leaving without Save reverts. Save persists the "
+        + "layout + the Virtual 3D switch (the mode change applies when playback next starts).")
 
     override func loadView() {
-        view = NSView(frame: NSRect(x: 0, y: 0, width: 640, height: 540))
+        view = NSView(frame: NSRect(x: 0, y: 0, width: 660, height: 600))
     }
 
     override func viewDidLoad() {
@@ -74,6 +85,11 @@ final class V3DPreferencesViewController: NSViewController {
         buildLayout()
         scene.setupScene()
         loadFromConfig()
+    }
+
+    override func viewWillDisappear() {
+        super.viewWillDisappear()
+        V3DConfig.clearPreview() // drop the live preview → engine reverts to the saved layout
     }
 
     // MARK: - layout
@@ -96,12 +112,16 @@ final class V3DPreferencesViewController: NSViewController {
             section("Front pair"),
             sliderRow("Spacing", frontSpacing_, frontSpacingValue, min: 0, max: 180, action: #selector(onFrontSpacing)),
             sliderRow("Elevation", frontElevation_, frontElevationValue, min: -60, max: 60, action: #selector(onFrontElevation)),
+            sliderRow("Gain (dB)", frontGain_, frontGainValue, min: -36, max: 24, action: #selector(onFrontGain)),
             section("Rear pair"),
             sliderRow("Spacing", rearSpacing_, rearSpacingValue, min: 0, max: 180, action: #selector(onRearSpacing)),
             sliderRow("Elevation", rearElevation_, rearElevationValue, min: -60, max: 60, action: #selector(onRearElevation)),
+            sliderRow("Gain (dB)", rearGain_, rearGainValue, min: -36, max: 24, action: #selector(onRearGain)),
             section("Mono speakers"),
             sliderRow("Centre height", centerHeight_, centerHeightValue, min: -2, max: 2, action: #selector(onCenterHeight)),
+            sliderRow("Centre gain (dB)", centerGain_, centerGainValue, min: -36, max: 24, action: #selector(onCenterGain)),
             sliderRow("LFE height", lfeHeight_, lfeHeightValue, min: -2, max: 2, action: #selector(onLfeHeight)),
+            sliderRow("LFE gain (dB)", lfeGain_, lfeGainValue, min: -36, max: 24, action: #selector(onLfeGain)),
         ])
         controls.orientation = .vertical
         controls.alignment = .leading
@@ -159,7 +179,7 @@ final class V3DPreferencesViewController: NSViewController {
         let titleLabel = NSTextField(labelWithString: title)
         titleLabel.font = .systemFont(ofSize: 11)
         titleLabel.translatesAutoresizingMaskIntoConstraints = false
-        titleLabel.widthAnchor.constraint(equalToConstant: 96).isActive = true
+        titleLabel.widthAnchor.constraint(equalToConstant: 110).isActive = true
 
         valueLabel.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
         valueLabel.textColor = .secondaryLabelColor
@@ -187,15 +207,20 @@ final class V3DPreferencesViewController: NSViewController {
         ]
         frontSpacing_.doubleValue = frontSpacing
         frontElevation_.doubleValue = frontEl
+        frontGain_.doubleValue = frontGainDb
         rearSpacing_.doubleValue = rearSpacing
         rearElevation_.doubleValue = rearEl
+        rearGain_.doubleValue = rearGainDb
         centerHeight_.doubleValue = centerY
+        centerGain_.doubleValue = centerGainDb
         lfeHeight_.doubleValue = lfeY
+        lfeGain_.doubleValue = lfeGainDb
         refreshDerived()
     }
 
-    // Derived-only refresh: feedback dots + 3D preview + value readouts (the draggable markers and
-    // sliders are moved by the user's gesture, so they are not reset here).
+    // Derived-only refresh: feedback dots + 3D preview + value readouts, AND push the working layout to
+    // the engine as a live (unsaved) preview. The draggable markers and sliders are moved by the user's
+    // gesture, so they are not reset here.
     private func refreshDerived() {
         let colors: [NSColor] = [.systemBlue, .systemBlue, .systemGreen, .systemPurple, .systemOrange, .systemOrange]
         let positions = speakerPositions()
@@ -206,19 +231,24 @@ final class V3DPreferencesViewController: NSViewController {
         stage.dots = dots
         scene.update(positions: positions)
         updateValueLabels()
+        V3DConfig.previewLayoutValues(currentValues()) // live: engine renders this without persisting
     }
 
     private func updateValueLabels() {
         frontSpacingValue.stringValue = String(format: "%.0f°", frontSpacing)
         frontElevationValue.stringValue = String(format: "%.0f°", frontEl)
+        frontGainValue.stringValue = String(format: "%+.0f dB", frontGainDb)
         rearSpacingValue.stringValue = String(format: "%.0f°", rearSpacing)
         rearElevationValue.stringValue = String(format: "%.0f°", rearEl)
+        rearGainValue.stringValue = String(format: "%+.0f dB", rearGainDb)
         centerHeightValue.stringValue = String(format: "%.1f m", centerY)
+        centerGainValue.stringValue = String(format: "%+.0f dB", centerGainDb)
         lfeHeightValue.stringValue = String(format: "%.1f m", lfeY)
+        lfeGainValue.stringValue = String(format: "%+.0f dB", lfeGainDb)
     }
 
     // The six speaker positions [FL, FR, C, LFE, RL, RR] from the working layout — mirrors the C++
-    // v3d_config::compute_speakers so the preview matches what the engine will render after Save.
+    // v3d_config::compute_speakers so the preview matches what the engine will render.
     private func speakerPositions() -> [(Double, Double, Double)] {
         func sph(_ azDeg: Double, _ elDeg: Double, _ d: Double) -> (Double, Double, Double) {
             let a = azDeg * .pi / 180, e = elDeg * .pi / 180, ce = cos(e)
@@ -229,6 +259,17 @@ final class V3DPreferencesViewController: NSViewController {
         let rl = sph(rearAz + rearSpacing / 2, rearEl, rearDist)
         let rr = sph(rearAz - rearSpacing / 2, rearEl, rearDist)
         return [fl, fr, (centerX, centerY, centerZ), (lfeX, lfeY, lfeZ), rl, rr]
+    }
+
+    // The 18-value layout array V3DConfig expects (geometry 0..13, gains 14..17).
+    private func currentValues() -> [NSNumber] {
+        [
+            NSNumber(value: frontDist), NSNumber(value: frontSpacing), NSNumber(value: frontAz), NSNumber(value: frontEl),
+            NSNumber(value: rearDist), NSNumber(value: rearSpacing), NSNumber(value: rearAz), NSNumber(value: rearEl),
+            NSNumber(value: centerX), NSNumber(value: centerY), NSNumber(value: centerZ),
+            NSNumber(value: lfeX), NSNumber(value: lfeY), NSNumber(value: lfeZ),
+            NSNumber(value: frontGainDb), NSNumber(value: rearGainDb), NSNumber(value: centerGainDb), NSNumber(value: lfeGainDb),
+        ]
     }
 
     // MARK: - normalized <-> metres mapping
@@ -258,30 +299,28 @@ final class V3DPreferencesViewController: NSViewController {
         rearAz = V3DConfig.rearAzimuth; rearEl = V3DConfig.rearElevation
         centerX = V3DConfig.centerX; centerY = V3DConfig.centerY; centerZ = V3DConfig.centerZ
         lfeX = V3DConfig.lfeX; lfeY = V3DConfig.lfeY; lfeZ = V3DConfig.lfeZ
+        frontGainDb = V3DConfig.frontGainDb; rearGainDb = V3DConfig.rearGainDb
+        centerGainDb = V3DConfig.centerGainDb; lfeGainDb = V3DConfig.lfeGainDb
         refreshAll()
     }
 
     @objc private func onSave() {
-        let values: [NSNumber] = [
-            NSNumber(value: frontDist), NSNumber(value: frontSpacing), NSNumber(value: frontAz), NSNumber(value: frontEl),
-            NSNumber(value: rearDist), NSNumber(value: rearSpacing), NSNumber(value: rearAz), NSNumber(value: rearEl),
-            NSNumber(value: centerX), NSNumber(value: centerY), NSNumber(value: centerZ),
-            NSNumber(value: lfeX), NSNumber(value: lfeY), NSNumber(value: lfeZ),
-        ]
-        V3DConfig.applyLayoutValues(values, mode: v3dEnabled)
+        V3DConfig.applyLayoutValues(currentValues(), mode: v3dEnabled) // persist + clear preview + set mode
     }
 
     @objc private func onReset() {
-        let v = V3DConfig.standard51Values // canonical 5.1 from the C++ default (Save still needed to apply)
-        guard v.count >= 14 else { return }
+        let v = V3DConfig.standard51Values // canonical 5.1 from the C++ default (Save still needed to persist)
+        guard v.count >= 18 else { return }
         frontDist = v[0].doubleValue; frontSpacing = v[1].doubleValue; frontAz = v[2].doubleValue; frontEl = v[3].doubleValue
         rearDist = v[4].doubleValue; rearSpacing = v[5].doubleValue; rearAz = v[6].doubleValue; rearEl = v[7].doubleValue
         centerX = v[8].doubleValue; centerY = v[9].doubleValue; centerZ = v[10].doubleValue
         lfeX = v[11].doubleValue; lfeY = v[12].doubleValue; lfeZ = v[13].doubleValue
+        frontGainDb = v[14].doubleValue; rearGainDb = v[15].doubleValue
+        centerGainDb = v[16].doubleValue; lfeGainDb = v[17].doubleValue
         refreshAll()
     }
 
-    // MARK: - edits (working state only; Save commits)
+    // MARK: - edits (working state + live preview; Save commits)
 
     @objc private func onToggleMode() { v3dEnabled = (modeToggle.state == .on) }
 
@@ -303,8 +342,12 @@ final class V3DPreferencesViewController: NSViewController {
 
     @objc private func onFrontSpacing() { frontSpacing = frontSpacing_.doubleValue; refreshDerived() }
     @objc private func onFrontElevation() { frontEl = frontElevation_.doubleValue; refreshDerived() }
+    @objc private func onFrontGain() { frontGainDb = frontGain_.doubleValue; refreshDerived() }
     @objc private func onRearSpacing() { rearSpacing = rearSpacing_.doubleValue; refreshDerived() }
     @objc private func onRearElevation() { rearEl = rearElevation_.doubleValue; refreshDerived() }
+    @objc private func onRearGain() { rearGainDb = rearGain_.doubleValue; refreshDerived() }
     @objc private func onCenterHeight() { centerY = centerHeight_.doubleValue; refreshDerived() }
+    @objc private func onCenterGain() { centerGainDb = centerGain_.doubleValue; refreshDerived() }
     @objc private func onLfeHeight() { lfeY = lfeHeight_.doubleValue; refreshDerived() }
+    @objc private func onLfeGain() { lfeGainDb = lfeGain_.doubleValue; refreshDerived() }
 }

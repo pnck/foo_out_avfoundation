@@ -41,11 +41,18 @@ namespace foo_out_avf
             constexpr const char *K_LFE_Y = "foo_out_avf.lfe.y";
             constexpr const char *K_LFE_Z = "foo_out_avf.lfe.z";
 
+            constexpr const char *K_FRONT_GAIN = "foo_out_avf.front.gain_db";
+            constexpr const char *K_REAR_GAIN = "foo_out_avf.rear.gain_db";
+            constexpr const char *K_CENTER_GAIN = "foo_out_avf.center.gain_db";
+            constexpr const char *K_LFE_GAIN = "foo_out_avf.lfe.gain_db";
+
             fb2k::configStore::ptr store() { return fb2k::configStore::get(); }
 
             std::mutex g_mutex;
             bool g_loaded = false;
             Layout g_layout;
+            bool g_hasPreview = false; // a transient preview layout is active (unsaved edits)
+            Layout g_previewLayout;
             std::atomic<unsigned long long> g_generation{0};
             std::atomic<unsigned long long> g_modeGeneration{0};
 
@@ -67,6 +74,10 @@ namespace foo_out_avf
                 g_layout.lfe.x = s->getConfigFloat(K_LFE_X, d.lfe.x);
                 g_layout.lfe.y = s->getConfigFloat(K_LFE_Y, d.lfe.y);
                 g_layout.lfe.z = s->getConfigFloat(K_LFE_Z, d.lfe.z);
+                g_layout.frontGainDb = s->getConfigFloat(K_FRONT_GAIN, d.frontGainDb);
+                g_layout.rearGainDb = s->getConfigFloat(K_REAR_GAIN, d.rearGainDb);
+                g_layout.centerGainDb = s->getConfigFloat(K_CENTER_GAIN, d.centerGainDb);
+                g_layout.lfeGainDb = s->getConfigFloat(K_LFE_GAIN, d.lfeGainDb);
                 g_loaded = true;
             }
 
@@ -87,6 +98,10 @@ namespace foo_out_avf
                 s->setConfigFloat(K_LFE_X, l.lfe.x);
                 s->setConfigFloat(K_LFE_Y, l.lfe.y);
                 s->setConfigFloat(K_LFE_Z, l.lfe.z);
+                s->setConfigFloat(K_FRONT_GAIN, l.frontGainDb);
+                s->setConfigFloat(K_REAR_GAIN, l.rearGainDb);
+                s->setConfigFloat(K_CENTER_GAIN, l.centerGainDb);
+                s->setConfigFloat(K_LFE_GAIN, l.lfeGainDb);
             }
 
             Vec3 spherical(double azDeg, double elDeg, double dist) {
@@ -105,6 +120,10 @@ namespace foo_out_avf
             d.rear = SpeakerPair{2.0, 140.0, 180.0, 0.0};  // surrounds at ±110° (180° ± 70°)
             d.center = Vec3{0.0, 0.0, -2.0};               // mono centre, dead ahead
             d.lfe = Vec3{0.0, -0.4, -1.5};                 // mono LFE, front and low
+            d.frontGainDb = 0.0;                           // unity gain everywhere by default
+            d.rearGainDb = 0.0;
+            d.centerGainDb = 0.0;
+            d.lfeGainDb = 0.0;
             return d;
         }
 
@@ -138,7 +157,7 @@ namespace foo_out_avf
             if (!g_loaded) {
                 load_locked();
             }
-            return g_layout;
+            return g_hasPreview ? g_previewLayout : g_layout;
         }
 
         void set_layout(const Layout &l) {
@@ -146,7 +165,25 @@ namespace foo_out_avf
                 std::lock_guard<std::mutex> lock(g_mutex);
                 g_layout = l;
                 g_loaded = true;
+                g_hasPreview = false; // committing supersedes any preview
                 persist_locked(l);
+            }
+            g_generation.fetch_add(1, std::memory_order_release);
+        }
+
+        void set_preview(const Layout &l) {
+            {
+                std::lock_guard<std::mutex> lock(g_mutex);
+                g_previewLayout = l;
+                g_hasPreview = true;
+            }
+            g_generation.fetch_add(1, std::memory_order_release);
+        }
+
+        void clear_preview() {
+            {
+                std::lock_guard<std::mutex> lock(g_mutex);
+                g_hasPreview = false;
             }
             g_generation.fetch_add(1, std::memory_order_release);
         }

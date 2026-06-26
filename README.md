@@ -35,6 +35,11 @@ Working on the engine internals? The output-pipeline contract and design notes l
 
 ## bugs & todo
 
+- [ ] **AirPods + the DSP Manager preferences page → choppy playback** (known, unsolved). Only on
+      Bluetooth (AirPods) while that specific page is shown, and only with this output. Sampled
+      exhaustively (foobar2000 and coreaudiod, normal vs choppy): both processes are byte-for-byte
+      identical and healthy — it's a scheduling/timing artifact in AVFoundation's out-of-process audio
+      delivery, below this plugin, so it isn't fixable here. Transient; doesn't affect normal use.
 - [ ] `source is stalling` shown on stop (matches CoreAudio output; treated as benign for now)
 - [ ] Virtual 3D mode: positional engine (`AVAudioEngine` + `AVAudioEnvironmentNode`, `HRTFHQ`)
       and the preferences panner UI (in progress)

@@ -17,6 +17,25 @@ namespace
 {
     Layout cur() { return v3d_config::layout(); }
     void put(const Layout &l) { v3d_config::set_layout(l); }
+
+    // Build a Layout from the 18-number value array the UI passes (geometry 0..13, gains 14..17).
+    // Missing trailing values keep the factory default, so older/short arrays still work.
+    Layout layoutFromValues(NSArray<NSNumber *> *v) {
+        Layout l = v3d_config::default_layout();
+        if (v.count >= 14) {
+            l.front = {v[0].doubleValue, v[1].doubleValue, v[2].doubleValue, v[3].doubleValue};
+            l.rear = {v[4].doubleValue, v[5].doubleValue, v[6].doubleValue, v[7].doubleValue};
+            l.center = {v[8].doubleValue, v[9].doubleValue, v[10].doubleValue};
+            l.lfe = {v[11].doubleValue, v[12].doubleValue, v[13].doubleValue};
+        }
+        if (v.count >= 18) {
+            l.frontGainDb = v[14].doubleValue;
+            l.rearGainDb = v[15].doubleValue;
+            l.centerGainDb = v[16].doubleValue;
+            l.lfeGainDb = v[17].doubleValue;
+        }
+        return l;
+    }
 } // namespace
 
 @implementation V3DConfig
@@ -58,6 +77,15 @@ namespace
 + (double)lfeZ { return cur().lfe.z; }
 + (void)setLfeZ:(double)v { Layout l = cur(); l.lfe.z = v; put(l); }
 
++ (double)frontGainDb { return cur().frontGainDb; }
++ (void)setFrontGainDb:(double)v { Layout l = cur(); l.frontGainDb = v; put(l); }
++ (double)rearGainDb { return cur().rearGainDb; }
++ (void)setRearGainDb:(double)v { Layout l = cur(); l.rearGainDb = v; put(l); }
++ (double)centerGainDb { return cur().centerGainDb; }
++ (void)setCenterGainDb:(double)v { Layout l = cur(); l.centerGainDb = v; put(l); }
++ (double)lfeGainDb { return cur().lfeGainDb; }
++ (void)setLfeGainDb:(double)v { Layout l = cur(); l.lfeGainDb = v; put(l); }
+
 + (NSArray<NSArray<NSNumber *> *> *)speakerPositions {
     const v3d_config::SpeakerPositions s = v3d_config::compute_speakers(cur());
     auto pt = [](const v3d_config::Vec3 &v) {
@@ -72,20 +100,22 @@ namespace
         @(d.front.distance), @(d.front.spacingDeg), @(d.front.centerAzDeg), @(d.front.centerElDeg),
         @(d.rear.distance), @(d.rear.spacingDeg), @(d.rear.centerAzDeg), @(d.rear.centerElDeg),
         @(d.center.x), @(d.center.y), @(d.center.z),
-        @(d.lfe.x), @(d.lfe.y), @(d.lfe.z)
+        @(d.lfe.x), @(d.lfe.y), @(d.lfe.z),
+        @(d.frontGainDb), @(d.rearGainDb), @(d.centerGainDb), @(d.lfeGainDb)
     ];
 }
 
 + (void)applyLayoutValues:(NSArray<NSNumber *> *)v mode:(BOOL)v3dEnabled {
-    if (v.count >= 14) {
-        Layout l;
-        l.front = {v[0].doubleValue, v[1].doubleValue, v[2].doubleValue, v[3].doubleValue};
-        l.rear = {v[4].doubleValue, v[5].doubleValue, v[6].doubleValue, v[7].doubleValue};
-        l.center = {v[8].doubleValue, v[9].doubleValue, v[10].doubleValue};
-        l.lfe = {v[11].doubleValue, v[12].doubleValue, v[13].doubleValue};
-        v3d_config::set_layout(l); // single persist + one generation bump
-    }
+    v3d_config::set_layout(layoutFromValues(v)); // persist + clear preview + one generation bump
     v3d_config::set_mode(v3dEnabled ? OutputMode::Virtual3D : OutputMode::SystemSpatial);
+}
+
++ (void)previewLayoutValues:(NSArray<NSNumber *> *)v {
+    v3d_config::set_preview(layoutFromValues(v)); // transient: engine renders it, not persisted
+}
+
++ (void)clearPreview {
+    v3d_config::clear_preview();
 }
 
 @end

@@ -36,18 +36,30 @@ NS_ASSUME_NONNULL_BEGIN
 @property(class, nonatomic) double lfeY;
 @property(class, nonatomic) double lfeZ;
 
+// Per-group gain in dB (0 = unity), to offset distance attenuation on far speakers.
+@property(class, nonatomic) double frontGainDb;
+@property(class, nonatomic) double rearGainDb;
+@property(class, nonatomic) double centerGainDb;
+@property(class, nonatomic) double lfeGainDb;
+
 // Computed positions of the six virtual speakers for the 3D preview, in order
 // [FL, FR, C, LFE, RL, RR]; each entry is @[x, y, z] in metres. The one source of geometry (shared
 // with the engine), so the preview can never drift from what's actually rendered.
 @property(class, nonatomic, readonly) NSArray<NSArray<NSNumber *> *> *speakerPositions;
 
-// The factory standard-5.1 layout values, in the same order applyLayoutValues: expects
-// (front d/spacing/az/el, rear d/spacing/az/el, centre x/y/z, LFE x/y/z). For the UI's "Reset".
+// The factory standard-5.1 layout values, in the same order applyLayoutValues: expects (18 numbers:
+// front d/spacing/az/el, rear d/spacing/az/el, centre x/y/z, LFE x/y/z, then the four gains in dB
+// front/rear/centre/LFE). For the UI's "Reset".
 @property(class, nonatomic, readonly) NSArray<NSNumber *> *standard51Values;
 
-// Commit a whole layout + mode in one shot (one persist, one generation bump). `values` is the 14
-// numbers in the order above; `v3dEnabled` selects the output mode. Used by the preferences "Save".
+// Commit a whole layout + mode in one shot (one persist, one generation bump, clears any preview).
+// `values` is the 18 numbers in the order above; `v3dEnabled` selects the output mode. The "Save".
 + (void)applyLayoutValues:(NSArray<NSNumber *> *)values mode:(BOOL)v3dEnabled;
+
+// Live preview (same 18-value order): install the values as a transient preview the engine renders
+// immediately WITHOUT persisting. clearPreview drops it (so leaving the page unsaved reverts).
++ (void)previewLayoutValues:(NSArray<NSNumber *> *)values;
++ (void)clearPreview;
 
 @end
 
