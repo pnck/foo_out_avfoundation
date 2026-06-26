@@ -51,11 +51,11 @@ namespace foo_out_avf
         bool is_paused;
         double m_buffer_length = 0.0;           // foobar's configured output buffer length (seconds)
         unsigned long long m_seen_mode_gen = 0; // last v3d_config mode generation we acted on
-        float m_volume = 1.0f;                  // last value from volume_set, re-applied across rebuilds
 
-        // setMode recreates the backend, so the log callback, buffer length AND volume must be
-        // (re)installed on the new one — otherwise a live mode switch loses the user's volume (and the
-        // logs fall back to NSLog instead of foobar's console). Configure mode first.
+        // setMode recreates the backend, so the log callback and buffer length must be (re)installed on
+        // the new one (else the logs fall back to NSLog instead of foobar's console). Volume is NOT
+        // re-applied here: foobar owns it and the backend itself stores the last value, so a mode switch
+        // carries it across in maybe_switch_mode rather than us caching a second copy. Configure mode first.
         void configure_engine_for_mode(OutputMode mode) {
             engine.setMode(mode);
             // Engine logs can originate on foobar's realtime feed thread; console::print dispatches to
@@ -66,7 +66,6 @@ namespace foo_out_avf
             });
             // foobar's configured buffer length is the steady-state lead; too small underruns AVF.
             engine.setBufferLength(m_buffer_length);
-            engine.setVolume(m_volume); // restore the user's volume onto the freshly-built backend
         }
 
         // An output instance is long-lived, so it would never re-read the mode after the user toggles
@@ -82,8 +81,12 @@ namespace foo_out_avf
             if (want == engine.mode()) {
                 return;
             }
+            // foobar owns the volume but won't re-push it on our internal backend swap, so carry the
+            // value the old backend currently holds across the rebuild (no separate cached copy).
+            const float volume = engine.getVolume();
             engine.disable();
             configure_engine_for_mode(want);
+            engine.setVolume(volume);
             is_active = engine.enable();
             if (is_active && is_paused) {
                 engine.pause(); // preserve the paused state across the rebuild
@@ -229,12 +232,11 @@ namespace foo_out_avf
         }
 
         void volume_set(double p_val) override {
-            // Pass foobar2000's value straight through to the renderer's linear gain —
-            // linear to linear, no curve/dB conversion. We don't assume how foobar maps
-            // its slider; whatever value it sends is applied verbatim. Cache it so a live
-            // mode switch (which rebuilds the backend) can re-apply it.
-            m_volume = static_cast<float>(p_val);
-            engine.setVolume(m_volume);
+            // Pass foobar2000's value straight through to the renderer's linear gain — linear to
+            // linear, no curve/dB conversion. We don't assume how foobar maps its slider; whatever
+            // value it sends is applied verbatim. foobar is the authority and the backend stores the
+            // applied value, so we keep no copy of our own (a live mode switch carries it across).
+            engine.setVolume(static_cast<float>(p_val));
         }
     };
 

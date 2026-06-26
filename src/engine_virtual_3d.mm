@@ -13,8 +13,9 @@
 //  {distance, spacing (the angle between the two), center azimuth, center elevation}, plus a freely
 //  positioned mono CENTER and LFE. The engine converts that (spherical → cartesian) to each bus's
 //  `position`; AVAudioEnvironmentNode only knows XYZ point sources, so that abstraction lives here.
-//  Channel → speaker mapping is by content channel count (stereo → front pair; 5.1 → front pair +
-//  center + LFE + rear pair).
+//  Channel → speaker mapping is by VIRTUAL speaker count (5.1 → front pair + center + LFE + rear pair).
+//  Plain stereo would only drive the front pair, leaving the rig half dead, so a stereo source is first
+//  upmixed to 5.1 (clean-room, stereo_upmix.h) — the virtual speaker count then exceeds the input count.
 //
 //  FEED MODEL — a PULL graph, unlike the default backend's push into AVSampleBufferAudioRenderer.
 //  Each AVAudioSourceNode pulls audio from a real-time render thread; foobar2000 pushes from its
@@ -49,6 +50,7 @@
 #include <cstring>
 
 #include "common/lead.h" // shared fsec / lead floors / currentOutputFloor — DO NOT copy-paste
+#include "stereo_upmix.h" // clean-room stereo → 5.1 upmix (V3D-only; feeds all six virtual speakers)
 
 // This TU is not inside namespace foo_out_avf (the @implementation is ObjC), so alias the config
 // namespace to keep the v3d_config:: call sites short, and bring the shared lead-policy names
@@ -81,6 +83,14 @@ namespace
             p <<= 1;
         }
         return p;
+    }
+
+    // How many VIRTUAL speakers to build for a given input channel count. Stereo is upmixed to 5.1 so
+    // the rear pair / centre / LFE aren't dead (the V3D feature is meaningless if only the front pair
+    // plays); everything else maps its content channels straight onto speakers (no upmix). Mono stays
+    // mono (a single centre speaker), matching speakerForChannel's count==1 case.
+    static uint32_t virtualChannelsForInput(uint32_t inputChannels) {
+        return (inputChannels == 2) ? foo_out_avf::StereoUpmixer::kOutChannels : inputChannels;
     }
 
     // The virtual speaker geometry (pair distance/spacing/azimuth/elevation → XYZ) lives in v3d_config
@@ -206,12 +216,17 @@ static OSStatus v3d_default_output_changed(AudioObjectID inObjectID, UInt32 inNu
     V3DShared *_shared;                   // heap-owned; render blocks capture a raw pointer (no self)
 
     unsigned long long _seenLayoutGen; // last v3d_config layout generation we applied (live pick-up gate)
-    uint32_t _channelCount;            // number of content channels = number of sources/rings
+    uint32_t _channelCount;            // number of VIRTUAL speakers = number of sources/rings
+    uint32_t _inputChannels;           // number of channels foobar feeds (may differ from _channelCount
+                                       // when we upmix stereo → 5.1)
+    bool _upmixActive;                 // true when input is stereo: deinterleave the upmix output, not raw input
+    foo_out_avf::StereoUpmixer _upmixer;
     bool _engineFailed;                // AVAudioEngine wouldn't start/build — stop feeding, surface it
 
     fsec _configured;
     std::atomic<fsec> _deviceFloor;
-    std::vector<float> _feedStaging; // producer-only scratch for the interleaved input chunk
+    std::vector<float> _feedStaging;  // producer-only scratch for the interleaved input chunk
+    std::vector<float> _upmixStaging; // producer-only scratch for the 6-ch upmix output (stereo input only)
     std::vector<float> _channelGain; // per-source linear gain, applied in the feed (not via mix.volume,
                                      // which clamps near unity; written by applyLayout, read by the feed —
                                      // both on the playback thread)
@@ -234,6 +249,8 @@ static OSStatus v3d_default_output_changed(AudioObjectID inObjectID, UInt32 inNu
     _configured = fsec(0);
     _deviceFloor.store(currentOutputFloor());
     _channelCount = 0;
+    _inputChannels = 0;
+    _upmixActive = false;
     _engineFailed = false;
     _seenLayoutGen = 0;
     _diagFeed = 0;
@@ -370,10 +387,10 @@ static OSStatus v3d_default_output_changed(AudioObjectID inObjectID, UInt32 inNu
     return std::max<size_t>(nextPow2(want), (size_t)8192);
 }
 
-// Rebuild the whole graph for a new (sample rate, channel count): one mono AVAudioSourceNode + ring per
-// content channel, each positioned at its mapped virtual speaker, all feeding the environment node.
-// Caller must have stopped the engine first.
-- (bool)rebuildGraphForSampleRate:(uint32_t)sampleRate channels:(uint32_t)channels {
+// Rebuild the whole graph for a new (sample rate, input channel count): one mono AVAudioSourceNode +
+// ring per VIRTUAL speaker (= input channels, or 6 when we upmix stereo), each positioned at its mapped
+// virtual speaker, all feeding the environment node. Caller must have stopped the engine first.
+- (bool)rebuildGraphForSampleRate:(uint32_t)sampleRate inputChannels:(uint32_t)inputChannels {
     // AVAudioEngine connections want the "standard" (deinterleaved float) format; an interleaved
     // format is a common cause of a silent or refused graph. For mono the sample layout is identical.
     AVAudioFormat *fmt = [[AVAudioFormat alloc] initStandardFormatWithSampleRate:sampleRate channels:1];
@@ -381,10 +398,17 @@ static OSStatus v3d_default_output_changed(AudioObjectID inObjectID, UInt32 inNu
         V3D_DIAG(@"[V3D] Failed to create mono AVAudioFormat (%u Hz)", sampleRate);
         _monoFormat = nil;
         _channelCount = 0;
+        _inputChannels = 0;
         return false;
     }
+    const uint32_t channels = virtualChannelsForInput(inputChannels); // virtual speakers (may upmix)
     _monoFormat = fmt;
+    _inputChannels = inputChannels;
     _channelCount = channels;
+    _upmixActive = (channels != inputChannels);
+    if (_upmixActive) {
+        _upmixer.reset(sampleRate);
+    }
     _shared->sampleRate = sampleRate;
     _shared->primed.store(false, std::memory_order_relaxed);
 
@@ -459,26 +483,28 @@ static OSStatus v3d_default_output_changed(AudioObjectID inObjectID, UInt32 inNu
         V3D_DIAG(@"[V3D] graph build FAILED: %@ — %@", ex.name, ex.reason ?: @"(nil)");
         _monoFormat = nil; // force a retry on the next feed (and keep surfacing the error)
         _channelCount = 0;
+        _inputChannels = 0;
         return false;
     }
 
     [self applyLayout];
-    V3D_DIAG(@"[V3D] graph rebuilt: %u ch @ %u Hz, ring=%zu samples/ch, target=%.0f ms", channels,
-             sampleRate, capacity, ms([self targetLead]));
+    V3D_DIAG(@"[V3D] graph rebuilt: in=%u ch -> %u speakers%s @ %u Hz, ring=%zu samples/ch, target=%.0f ms",
+             inputChannels, channels, _upmixActive ? " (upmix)" : "", sampleRate, capacity,
+             ms([self targetLead]));
     return true;
 }
 
 - (bool)setupAudioFormat:(uint32_t)sampleRate channels:(uint32_t)channels {
-    if (_monoFormat != nil && sampleRate == (uint32_t)_monoFormat.sampleRate && channels == _channelCount) {
+    if (_monoFormat != nil && sampleRate == (uint32_t)_monoFormat.sampleRate && channels == _inputChannels) {
         return true;
     }
-    // Sample rate or channel count changed (or first format): rebuild. Stop first so the render thread
-    // is quiesced and the ring/node swap is race-free.
+    // Sample rate or INPUT channel count changed (or first format): rebuild. Stop first so the render
+    // thread is quiesced and the ring/node swap is race-free.
     const bool wasRunning = _engine.isRunning;
     if (wasRunning) {
         [_engine stop];
     }
-    if (![self rebuildGraphForSampleRate:sampleRate channels:channels]) {
+    if (![self rebuildGraphForSampleRate:sampleRate inputChannels:channels]) {
         return false;
     }
     [self startEngineIfReady];
@@ -574,6 +600,9 @@ static OSStatus v3d_default_output_changed(AudioObjectID inObjectID, UInt32 inNu
         r->read.store(0, std::memory_order_relaxed);
         r->write.store(0, std::memory_order_relaxed);
     }
+    if (_upmixActive) {
+        _upmixer.clear(); // drop the STFT accumulator/overlap/FIFO so the new position doesn't bleed
+    }
     _shared->primed.store(false, std::memory_order_relaxed);
     if (wasRunning) {
         [self startEngineIfReady];
@@ -605,24 +634,47 @@ static OSStatus v3d_default_output_changed(AudioObjectID inObjectID, UInt32 inNu
     }
     const size_t take = std::min(frameCount, freeFrames);
 
-    // Convert foobar's f64 chunk into the interleaved float staging buffer (take frames × channels),
-    // then deinterleave into the per-channel rings (one mono speaker each).
+    // Convert foobar's f64 chunk into the interleaved float staging buffer (take frames × input channels).
     const size_t inSamples = take * channels;
     if (_feedStaging.size() < inSamples) {
         _feedStaging.resize(inSamples);
     }
     convert(_feedStaging.data(), take);
 
-    const float *in = _feedStaging.data();
-    const size_t nch = std::min<size_t>(channels, _rings.size());
+    // Either deinterleave the raw input straight into the rings, or run it through the STFT upmixer.
+    // The upmixer is BLOCK-based: output frames != input frames (one block of latency, then ~1:1), so
+    // input consumed (`take`, the return value) is decoupled from what we bank into the rings this call
+    // (`produced`, what the upmixer can hand back now). The rings advance by `produced`; foobar keeps
+    // the `take` it gave us. The upmix output order (FL FR C LFE RL RR) is exactly the 5.1 interleave
+    // the speaker map expects.
+    const float *src = _feedStaging.data();
+    size_t srcChannels = channels;
+    size_t produced = take;
+    if (_upmixActive) {
+        _upmixer.pushStereo(_feedStaging.data(), take);
+        // Pull what's ready, bounded by the physical ring space (the lead budget is already honoured by
+        // freeFrames, which counts the upmixer's pending output too).
+        const size_t buffered = _rings[0]->buffered();
+        const size_t ringRoom = (_rings[0]->capacity > buffered) ? (_rings[0]->capacity - buffered) : 0;
+        const size_t want = std::min(_upmixer.available(), ringRoom);
+        const size_t upSamples = want * foo_out_avf::StereoUpmixer::kOutChannels;
+        if (_upmixStaging.size() < upSamples) {
+            _upmixStaging.resize(upSamples);
+        }
+        produced = _upmixer.pull(_upmixStaging.data(), want);
+        src = _upmixStaging.data();
+        srcChannels = foo_out_avf::StereoUpmixer::kOutChannels;
+    }
+
+    const size_t nch = std::min<size_t>(srcChannels, _rings.size());
     for (size_t c = 0; c < nch; ++c) {
         V3DChannelRing *r = _rings[c];
         const float gain = (c < _channelGain.size()) ? _channelGain[c] : 1.0f; // per-group gain, in samples
         const size_t w = r->write.load(std::memory_order_relaxed);
-        for (size_t i = 0; i < take; ++i) {
-            r->buf[(w + i) & r->mask] = in[i * channels + c] * gain;
+        for (size_t i = 0; i < produced; ++i) {
+            r->buf[(w + i) & r->mask] = src[i * srcChannels + c] * gain;
         }
-        r->write.store(w + take, std::memory_order_release);
+        r->write.store(w + produced, std::memory_order_release);
     }
 
     // Priming: once the banked lead reaches the (smaller) prime threshold, let the render blocks drain.
@@ -647,7 +699,14 @@ static OSStatus v3d_default_output_changed(AudioObjectID inObjectID, UInt32 inNu
     if (sr == 0 || _rings.empty()) {
         return 0;
     }
-    const fsec freeRoom = [self targetLead] - [self lead];
+    // Banked lead = what's in the rings, PLUS (when upmixing) what the STFT upmixer has already produced
+    // but we haven't pulled into the rings yet — both are audio queued ahead of the clock, so both count
+    // against the target lead. Without this the backpressure would let the upmixer's output FIFO grow.
+    fsec banked = [self lead];
+    if (_upmixActive) {
+        banked += fsec((double)_upmixer.available() / (double)sr);
+    }
+    const fsec freeRoom = [self targetLead] - banked;
     if (freeRoom < kMinFeed) {
         return 0;
     }
@@ -720,7 +779,10 @@ static OSStatus v3d_default_output_changed(AudioObjectID inObjectID, UInt32 inNu
     if (!_isEnabled) {
         return 0.0;
     }
-    const double secs = [self lead].count();
+    double secs = [self lead].count();
+    if (_upmixActive && _shared->sampleRate > 0) {
+        secs += (double)_upmixer.latencyFrames() / (double)_shared->sampleRate; // STFT algorithmic latency
+    }
     return (secs > 0.0 && secs == secs) ? secs : 0.0;
 }
 

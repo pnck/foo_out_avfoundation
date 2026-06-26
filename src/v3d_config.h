@@ -40,7 +40,9 @@ namespace foo_out_avf
 
         // The whole rig: a front pair + a rear pair, plus a freely-placed mono centre and LFE, with a
         // per-group gain (dB; 0 = unity) so the user can compensate for the distance attenuation that
-        // makes far speakers quiet. Gains map to each source node's mixer volume, not its position.
+        // makes far speakers quiet. The gain is applied to the samples in the feed path (see
+        // engine_virtual_3d.mm's _channelGain), NOT to the source node's mixer volume — AVAudioMixing
+        // clamps volume near unity, so a mixer-volume boost wouldn't take.
         struct Layout {
             SpeakerPair front;
             SpeakerPair rear;

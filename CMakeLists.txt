@@ -23,12 +23,15 @@ cmake_minimum_required(VERSION 3.24)
 #     A local Debug build appends the commit hash + dirty flag (see FB2K_VERSION below);
 #     a local Release build shows BASE_VERSION as-is.
 #   * On a tagged release CI passes -DVERSION_OVERRIDE=<tag>, which wins over BASE_VERSION,
-#     so the published build always matches its tag even if BASE_VERSION wasn't bumped.
+#     so the published build always matches its tag even if BASE_VERSION wasn't bumped — BUT ONLY
+#     when the tag is actually NEWER. The effective version is max(BASE_VERSION, VERSION_OVERRIDE):
+#     a stale/older tag can never stamp the build with a lower number than the source declares
+#     (e.g. BASE_VERSION 0.2.0 with an old tag 0.1.0 still builds as 0.2.0).
 # Everything downstream — Info.plist's CFBundle*Version and the About-box string — derives
 # from this. There is no second place that hard-codes a version number.
 # ---------------------------------------------------------------------------
-set(BASE_VERSION "0.2.0")
-if(VERSION_OVERRIDE)
+set(BASE_VERSION "0.2.1")
+if(VERSION_OVERRIDE AND VERSION_OVERRIDE VERSION_GREATER BASE_VERSION)
     set(BASE_VERSION "${VERSION_OVERRIDE}")
 endif()
 
@@ -222,6 +225,7 @@ target_link_libraries(foo_out_avfoundation PRIVATE
     "-framework CoreAudio"
     "-framework CoreMedia"
     "-framework AudioToolbox"
+    "-framework Accelerate" # vDSP — STFT upmix kernel (stereo_upmix.cpp)
     "-framework Cocoa")
 
 # ---------------------------------------------------------------------------

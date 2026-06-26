@@ -119,11 +119,13 @@ namespace foo_out_avf
             d.front = SpeakerPair{2.0, 60.0, 0.0, 0.0};    // ±30° in front
             d.rear = SpeakerPair{2.0, 140.0, 180.0, 0.0};  // surrounds at ±110° (180° ± 70°)
             d.center = Vec3{0.0, 0.0, -2.0};               // mono centre, dead ahead
-            d.lfe = Vec3{0.0, -0.4, -1.5};                 // mono LFE, front and low
-            d.frontGainDb = 0.0;                           // unity gain everywhere by default
+            d.lfe = Vec3{0.0, -0.3, -1.0};                 // mono LFE, front-low and fairly close in
+            d.frontGainDb = 0.0;                           // unity gain for the mains by default
             d.rearGainDb = 0.0;
             d.centerGainDb = 0.0;
-            d.lfeGainDb = 0.0;
+            d.lfeGainDb = -3.0;                            // trimmed: the mains keep a −12 dB bass floor
+                                                           // now, so the LFE carries less of the low end
+                                                           // (−3 dB lands total low-end ≈ original stereo)
             return d;
         }
 

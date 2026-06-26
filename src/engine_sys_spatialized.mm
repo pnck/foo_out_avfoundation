@@ -29,14 +29,6 @@
 #include <atomic>
 #include <chrono>
 
-// Compatibility macros for different macOS versions' 3D audio API
-#ifndef AVAudio3DPointMake
-#define AVAudio3DPointMake(x, y, z) \
-    (AVAudio3DPoint) {              \
-        x, y, z                     \
-    }
-#endif
-
 // THE single logging path for everything [AVF] — traces, enable/disable, errors alike. Expands to
 // a -logMessage call in Debug and to nothing in Release (NDEBUG), so the component is completely
 // silent in Release and the arguments aren't even evaluated (matters on the realtime feed thread).
@@ -108,12 +100,6 @@ static OSStatus avf_default_output_changed(AudioObjectID inObjectID, UInt32 inNu
 
     bool _isPaused;
     bool _formatUnsupported; // stream's channel count has no usable AVAudioFormat — stop feeding
-
-    struct VENV {
-        AVAudio3DPoint listenerPosition;
-        AVAudio3DAngularOrientation listenerOrientation;
-        AVAudio3DPoint sourcePosition;
-    } *venv;
 }
 
 - (instancetype)init {
@@ -121,12 +107,6 @@ static OSStatus avf_default_output_changed(AudioObjectID inObjectID, UInt32 inNu
     if (!self) {
         return nil;
     }
-
-    venv = new VENV{
-        .listenerPosition = AVAudio3DPointMake(0, 0, 0),
-        .listenerOrientation = (AVAudio3DAngularOrientation){0, 0, 0},
-        .sourcePosition = AVAudio3DPointMake(0, 0, -1)
-    };
 
     if (@available(macOS 11.0, *)) {
         renderer = [[AVSampleBufferAudioRenderer alloc] init];
@@ -170,10 +150,6 @@ static OSStatus avf_default_output_changed(AudioObjectID inObjectID, UInt32 inNu
     AudioObjectRemovePropertyListener(kAudioObjectSystemObject, &kDefaultOutputDeviceAddr,
                                       avf_default_output_changed, (__bridge void *)self);
     [self disable];
-    if (venv) {
-        delete venv;
-        venv = nullptr;
-    }
 }
 
 // --- logging ---------------------------------------------------------------
@@ -614,24 +590,26 @@ static OSStatus avf_default_output_changed(AudioObjectID inObjectID, UInt32 inNu
     return _isEnabled && _primed && !_isPaused;
 }
 
-// --- spatial (currently informational; not wired to a positional renderer) -
+// --- spatial ---------------------------------------------------------------
+// The system spatializer owns placement, so these positional setters are no-ops here (the V3D
+// backend is the one that wires them into HRTFHQ). Kept only to satisfy the AVFOutputBackend protocol.
 
 - (void)setListenerPosition:(float)x y:(float)y z:(float)z {
-    if (venv) {
-        venv->listenerPosition = AVAudio3DPointMake(x, y, z);
-    }
+    (void)x;
+    (void)y;
+    (void)z;
 }
 
 - (void)setListenerOrientation:(float)yaw pitch:(float)pitch roll:(float)roll {
-    if (venv) {
-        venv->listenerOrientation = AVAudio3DAngularOrientation{yaw, pitch, roll};
-    }
+    (void)yaw;
+    (void)pitch;
+    (void)roll;
 }
 
 - (void)setSourcePosition:(float)x y:(float)y z:(float)z {
-    if (venv) {
-        venv->sourcePosition = AVAudio3DPointMake(x, y, z);
-    }
+    (void)x;
+    (void)y;
+    (void)z;
 }
 
 @end
