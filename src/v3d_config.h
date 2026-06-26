@@ -68,6 +68,21 @@ namespace foo_out_avf
 
         SpeakerPositions compute_speakers(const Layout &layout);
 
+        // Global DSP parameters for the stereo→5.1 STFT upmix: the bass-management high-pass on the mains
+        // and the FFT window size. Persisted separately from the layout, with their own generation, so the
+        // engine rebuilds the upmixer (which reallocates for a new FFT size and recomputes the crossover)
+        // when they change. These are NOT previewed — there's no transient variant.
+        struct DspParams {
+            double bassFloorDb;  // mains' low-end floor below the crossover (dB; 0 = keep all, −36 ≈ full cut)
+            double bassCutoffHz; // bass-management crossover centre frequency (Hz)
+            double bassQ;        // crossover steepness (higher Q = narrower transition band)
+            int fftSize;         // STFT window size: 1024 | 2048 | 4096
+        };
+        DspParams default_dsp_params();
+        DspParams dsp_params();
+        void set_dsp_params(const DspParams &p);
+        unsigned long long dsp_generation();
+
         // Output spatialization mode (default: SystemSpatial). Mode changes take effect on the next
         // playback start (the output rebuilds its engine then), so they are NOT part of the live layout.
         OutputMode mode();

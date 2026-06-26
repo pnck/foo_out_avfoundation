@@ -42,6 +42,13 @@ NS_ASSUME_NONNULL_BEGIN
 @property(class, nonatomic) double centerGainDb;
 @property(class, nonatomic) double lfeGainDb;
 
+// Global STFT-upmix DSP params (bass-management high-pass on the mains + FFT window). Each write
+// persists and bumps the DSP generation, so a playing engine rebuilds the upmixer live.
+@property(class, nonatomic) double bassFloorDb;  // mains' low-end floor below the crossover (dB)
+@property(class, nonatomic) double bassCutoffHz; // crossover centre frequency (Hz)
+@property(class, nonatomic) double bassQ;        // crossover steepness (higher = narrower transition)
+@property(class, nonatomic) NSInteger fftSize;   // STFT window: 1024 | 2048 | 4096
+
 // Computed positions of the six virtual speakers for the 3D preview, in order
 // [FL, FR, C, LFE, RL, RR]; each entry is @[x, y, z] in metres. The one source of geometry (shared
 // with the engine), so the preview can never drift from what's actually rendered.

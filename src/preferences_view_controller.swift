@@ -46,6 +46,19 @@ final class V3DPreferencesViewController: NSViewController {
     private var sceneLabel = NSTextField()
     private var formItems: [(NSView, CGFloat)] = []
 
+    // DSP controls: FFT window size sits in the fixed area above the panels; the bass-management
+    // high-pass params (floor/cutoff/Q) live in the scrollable LFE section.
+    private let bassFloorField = NSTextField()
+    private let bassFloorStepper = NSStepper()
+    private let bassCutoffField = NSTextField()
+    private let bassCutoffStepper = NSStepper()
+    private let bassQField = NSTextField()
+    private let bassQStepper = NSStepper()
+    private let fftPopup = NSPopUpButton()
+    private let fftNote = NSTextField(labelWithString: "")
+    private var dspRows: [NSView] = []
+    private let fftSizes = [1024, 2048, 4096]
+
     // Every group is edited in the SAME spherical terms (distance / azimuth / elevation), so the mono
     // centre + LFE behave exactly like the pairs; the pairs add spacing, everything has a gain.
     private let frontDistance_ = NSSlider()
@@ -143,6 +156,12 @@ final class V3DPreferencesViewController: NSViewController {
         view.addSubview(resetButton)
         view.addSubview(saveButton)
 
+        // Only the FFT window size stays fixed above the panels (it governs latency / output-buffer
+        // sizing — a global concern). The bass-management high-pass params live in the scrollable LFE
+        // section below.
+        dspRows = [makeFftRow()]
+        for r in dspRows { view.addSubview(r) }
+
         scrollView.hasVerticalScroller = true
         scrollView.hasHorizontalScroller = false
         scrollView.drawsBackground = false
@@ -174,6 +193,16 @@ final class V3DPreferencesViewController: NSViewController {
         addRow("Elevation", lfeElevation_, lfeElevationValue, -90, 90, #selector(onLfeElevation))
         addRow("Distance", lfeDistance_, lfeDistanceValue, 0.3, 4.0, #selector(onLfeDistance))
         addRow("Gain (dB)", lfeGain_, lfeGainValue, -36, 24, #selector(onLfeGain))
+        // Bass-management high-pass (mains' low-end floor + crossover) — global DSP, grouped under LFE.
+        addStepperRow("High-pass floor (dB)", bassFloorField, bassFloorStepper,
+                      min: -36, max: 0, step: 1, decimals: 0,
+                      #selector(onBassFloorStepper), #selector(onBassFloorField))
+        addStepperRow("Crossover cutoff (Hz)", bassCutoffField, bassCutoffStepper,
+                      min: 40, max: 300, step: 5, decimals: 0,
+                      #selector(onBassCutoffStepper), #selector(onBassCutoffField))
+        addStepperRow("Crossover Q (steepness)", bassQField, bassQStepper,
+                      min: 0.3, max: 5, step: 0.1, decimals: 1,
+                      #selector(onBassQStepper), #selector(onBassQField))
         view.addSubview(hint) // fixed (outside the scroll) — always visible
     }
 
@@ -184,12 +213,91 @@ final class V3DPreferencesViewController: NSViewController {
         return l
     }
 
+    // A "number box with arrows": label (left) + editable numeric field + NSStepper (right). Field and
+    // stepper are kept in sync by their actions; both pinned right via autoresizing so the label takes slack.
+    private func makeStepperRow(_ title: String, _ field: NSTextField, _ stepper: NSStepper,
+                                min: Double, max: Double, step: Double, decimals: Int,
+                                _ stepperAction: Selector, _ fieldAction: Selector) -> NSView {
+        let rowH: CGFloat = 24
+        let row = NSView(frame: NSRect(x: 0, y: 0, width: 360, height: rowH))
+        row.autoresizesSubviews = true
+
+        let t = NSTextField(labelWithString: title)
+        t.font = .systemFont(ofSize: 11)
+        t.frame = NSRect(x: 0, y: 4, width: 190, height: 16)
+        t.autoresizingMask = [.maxXMargin]
+
+        stepper.minValue = min
+        stepper.maxValue = max
+        stepper.increment = step
+        stepper.valueWraps = false
+        stepper.target = self
+        stepper.action = stepperAction
+        let sw: CGFloat = 19, fw: CGFloat = 64
+        stepper.frame = NSRect(x: 360 - sw, y: 2, width: sw, height: 20)
+        stepper.autoresizingMask = [.minXMargin]
+
+        let fmt = NumberFormatter()
+        fmt.minimumFractionDigits = decimals
+        fmt.maximumFractionDigits = decimals
+        field.formatter = fmt
+        field.alignment = .right
+        field.isEditable = true
+        field.isBezeled = true
+        field.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
+        field.target = self
+        field.action = fieldAction
+        field.frame = NSRect(x: 360 - sw - 4 - fw, y: 3, width: fw, height: 18)
+        field.autoresizingMask = [.minXMargin]
+
+        row.addSubview(t)
+        row.addSubview(field)
+        row.addSubview(stepper)
+        return row
+    }
+
+    private func makeFftRow() -> NSView {
+        let rowH: CGFloat = 26
+        let row = NSView(frame: NSRect(x: 0, y: 0, width: 360, height: rowH))
+        row.autoresizesSubviews = true
+
+        let t = NSTextField(labelWithString: "FFT window")
+        t.font = .systemFont(ofSize: 11)
+        t.frame = NSRect(x: 0, y: 5, width: 90, height: 16)
+        t.autoresizingMask = [.maxXMargin]
+
+        fftPopup.removeAllItems()
+        fftPopup.addItems(withTitles: fftSizes.map { String($0) })
+        fftPopup.target = self
+        fftPopup.action = #selector(onFftChanged)
+        fftPopup.frame = NSRect(x: 92, y: 1, width: 78, height: 22)
+        fftPopup.autoresizingMask = [.maxXMargin]
+
+        fftNote.font = .systemFont(ofSize: 10)
+        fftNote.textColor = .secondaryLabelColor
+        fftNote.frame = NSRect(x: 178, y: 5, width: 360 - 178, height: 16)
+        fftNote.autoresizingMask = [.width]
+
+        row.addSubview(t)
+        row.addSubview(fftPopup)
+        row.addSubview(fftNote)
+        return row
+    }
+
+    // The FFT block's algorithmic latency = N samples; show it in ms at 48 kHz so the user can size
+    // foobar's output buffer accordingly (the buffer must cover at least this).
+    private func updateFftNote() {
+        let n = fftSizes[Swift.max(0, fftPopup.indexOfSelectedItem)]
+        let ms = Double(n) / 48.0
+        fftNote.stringValue = String(format: "≈ %.0f ms latency @ 48 kHz — set output buffer ≥ this", ms)
+    }
+
     private func addSection(_ title: String) {
         let l = NSTextField(labelWithString: title)
-        l.font = .boldSystemFont(ofSize: 11)
+        l.font = .boldSystemFont(ofSize: 13)
         l.textColor = .secondaryLabelColor
         docView.addSubview(l)
-        formItems.append((l, 20))
+        formItems.append((l, 22))
     }
 
     private func addRow(_ title: String, _ slider: NSSlider, _ value: NSTextField,
@@ -226,6 +334,16 @@ final class V3DPreferencesViewController: NSViewController {
         formItems.append((row, rowH))
     }
 
+    // Like addRow, but for a stepper row (number box + arrows) placed in the scrollable form.
+    private func addStepperRow(_ title: String, _ field: NSTextField, _ stepper: NSStepper,
+                               min: Double, max: Double, step: Double, decimals: Int,
+                               _ stepperAction: Selector, _ fieldAction: Selector) {
+        let row = makeStepperRow(title, field, stepper, min: min, max: max, step: step, decimals: decimals,
+                                 stepperAction, fieldAction)
+        docView.addSubview(row)
+        formItems.append((row, row.frame.height))
+    }
+
     // The single layout pass: position every control by frame from the current view bounds. No Auto
     // Layout, no fittingSize → foobar's NSSplitView has nothing to anchor to, so we track the pane.
     private func relayout() {
@@ -251,6 +369,13 @@ final class V3DPreferencesViewController: NSViewController {
         var y: CGFloat = pad
         modeToggle.frame = NSRect(x: bx, y: y, width: blockW, height: 20)
         y += 20 + gap
+
+        // DSP controls (bass high-pass + FFT), fixed above the panels.
+        for r in dspRows {
+            r.frame = NSRect(x: bx, y: y, width: blockW, height: r.frame.height)
+            y += r.frame.height + 4
+        }
+        y += gap
 
         // Two 1:1 render panels at the top of the block.
         stageLabel.frame = NSRect(x: bx, y: y, width: side, height: 14)
@@ -441,6 +566,14 @@ final class V3DPreferencesViewController: NSViewController {
         lfeX = V3DConfig.lfeX; lfeY = V3DConfig.lfeY; lfeZ = V3DConfig.lfeZ
         frontGainDb = V3DConfig.frontGainDb; rearGainDb = V3DConfig.rearGainDb
         centerGainDb = V3DConfig.centerGainDb; lfeGainDb = V3DConfig.lfeGainDb
+
+        // DSP controls (bass high-pass + FFT window).
+        bassFloorStepper.doubleValue = V3DConfig.bassFloorDb; bassFloorField.doubleValue = V3DConfig.bassFloorDb
+        bassCutoffStepper.doubleValue = V3DConfig.bassCutoffHz; bassCutoffField.doubleValue = V3DConfig.bassCutoffHz
+        bassQStepper.doubleValue = V3DConfig.bassQ; bassQField.doubleValue = V3DConfig.bassQ
+        fftPopup.selectItem(at: fftSizes.firstIndex(of: V3DConfig.fftSize) ?? 1)
+        updateFftNote()
+
         refreshAll()
     }
 
@@ -526,6 +659,16 @@ final class V3DPreferencesViewController: NSViewController {
     @objc private func onLfeAzimuth() { setLfe(az: lfeAzimuth_.doubleValue) }
     @objc private func onLfeElevation() { setLfe(el: lfeElevation_.doubleValue) }
     @objc private func onLfeGain() { lfeGainDb = lfeGain_.doubleValue; refreshDerived() }
+
+    // DSP params — persisted immediately via V3DConfig (each write bumps the DSP generation so a playing
+    // engine rebuilds the upmixer). Stepper and field mirror each other; setting the stepper clamps to range.
+    @objc private func onBassFloorStepper() { bassFloorField.doubleValue = bassFloorStepper.doubleValue; V3DConfig.bassFloorDb = bassFloorStepper.doubleValue }
+    @objc private func onBassFloorField() { bassFloorStepper.doubleValue = bassFloorField.doubleValue; bassFloorField.doubleValue = bassFloorStepper.doubleValue; V3DConfig.bassFloorDb = bassFloorStepper.doubleValue }
+    @objc private func onBassCutoffStepper() { bassCutoffField.doubleValue = bassCutoffStepper.doubleValue; V3DConfig.bassCutoffHz = bassCutoffStepper.doubleValue }
+    @objc private func onBassCutoffField() { bassCutoffStepper.doubleValue = bassCutoffField.doubleValue; bassCutoffField.doubleValue = bassCutoffStepper.doubleValue; V3DConfig.bassCutoffHz = bassCutoffStepper.doubleValue }
+    @objc private func onBassQStepper() { bassQField.doubleValue = bassQStepper.doubleValue; V3DConfig.bassQ = bassQStepper.doubleValue }
+    @objc private func onBassQField() { bassQStepper.doubleValue = bassQField.doubleValue; bassQField.doubleValue = bassQStepper.doubleValue; V3DConfig.bassQ = bassQStepper.doubleValue }
+    @objc private func onFftChanged() { V3DConfig.fftSize = fftSizes[Swift.max(0, fftPopup.indexOfSelectedItem)]; updateFftNote() }
 
     // Replace one spherical component of a mono speaker (keeping the other two) and write back cartesian.
     private func setCenter(dist: Double? = nil, az: Double? = nil, el: Double? = nil) {

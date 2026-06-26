@@ -44,14 +44,23 @@ namespace foo_out_avf
     public:
         static constexpr uint32_t kOutChannels = 6; // FL FR C LFE RL RR (5.1 interleave order)
 
+        // User-configurable DSP parameters (from v3d_config). The bass-management high-pass on the mains
+        // and the FFT window size; defaults reproduce the original hardcoded behaviour.
+        struct Params {
+            float bassFloorDb = -12.0f;   // mains' low-end floor below the crossover (dB)
+            float bassCutoffHz = 113.0f;  // crossover centre frequency (Hz)
+            float bassQ = 1.0f;           // crossover steepness (higher = narrower transition)
+            int fftSize = 2048;           // STFT window: 1024 | 2048 | 4096 (others snap to 2048)
+        };
+
         StereoUpmixer();
         ~StereoUpmixer();
         StereoUpmixer(const StereoUpmixer &) = delete;
         StereoUpmixer &operator=(const StereoUpmixer &) = delete;
 
-        // (Re)build the STFT machinery for a sample rate and clear all state. Allocates; call off the
-        // real-time path (the engine calls it during a stopped-engine graph rebuild).
-        void reset(uint32_t sampleRate);
+        // (Re)build the STFT machinery for a sample rate + params and clear all state. Allocates; call off
+        // the real-time path (the engine calls it during a stopped-engine graph rebuild).
+        void reset(uint32_t sampleRate, const Params &params);
 
         // Drop buffered audio + analysis state for a seek/flush, keeping the FFT setup and window.
         void clear();

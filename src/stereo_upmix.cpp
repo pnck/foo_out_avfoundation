@@ -37,21 +37,13 @@ namespace foo_out_avf
     namespace
     {
         constexpr double kPi = 3.14159265358979323846;
-        constexpr int kN = 2048;             // FFT size
-        constexpr int kLog2N = 11;           // log2(kN)
-        constexpr int kHop = kN / 4;         // 75% overlap
-        constexpr int kHalf = kN / 2;        // real-FFT bins (DC..Nyquist packed)
         constexpr float kRear = 0.7071f;     // ambience level into the rear pair (−3 dB), tunable
         constexpr double kSmoothTau = 0.05;  // coherence/balance smoothing time constant (s)
         constexpr float kEps = 1e-9f;
-        constexpr double kXoverLo = 80.0;    // bass-management crossover transition band (Hz)
-        constexpr double kXoverHi = 160.0;
-        // The mains are NOT fully high-passed below the crossover: their low end is attenuated to a floor
-        // of −12 dB (not −∞), so the bass still has body in the five main speakers instead of being an
-        // isolated "LFE only" effect. The LFE takes the power-complementary remainder, and its default
-        // layout gain is trimmed down to keep the total low-end energy in check.
-        constexpr float kHpFloor = 0.25118864f; // 10^(−12/20): −12 dB high-pass floor for the mains
-        constexpr float kLfeSum = 0.70710678f;  // (L+R)/√2: energy-preserving mono sum for the LFE
+        constexpr float kLfeSum = 0.70710678f; // (L+R)/√2: energy-preserving mono sum for the LFE
+        // The FFT window (N, log2N, hop = N/4, half = N/2) and the bass-management crossover (Hz band +
+        // a −X dB floor on the mains) are now USER-CONFIGURABLE — see StereoUpmixer::Params — so they are
+        // runtime members of Impl set in build() from the passed params, not compile-time constants.
 
         // 5.1 channel order produced (matches the engine's speakerForChannel 6-channel case).
         enum { CH_FL = 0, CH_FR, CH_C, CH_LFE, CH_RL, CH_RR, CH_COUNT };
@@ -89,12 +81,13 @@ namespace foo_out_avf
 
     struct StereoUpmixer::Impl {
         uint32_t sr = 0;
+        int N = 2048, log2N = 11, hop = 512, half = 1024; // FFT window — set in build() from Params
         FFTSetup setup = nullptr;
         float alpha = 0.0f;    // one-pole smoothing coefficient
         float olaScale = 0.0f; // 1 / (2N · winNorm) — vDSP round-trip × window normalisation
 
         std::vector<float> win;              // sqrt-Hann, length N
-        std::vector<float> hpGain, lpGain;   // bass-management crossover gains (mains/LFE), length kHalf
+        std::vector<float> hpGain, lpGain;   // bass-management crossover gains (mains/LFE), length half
 
         // Input accumulator (one analysis block, slid by H each frame).
         std::vector<float> inL, inR; // length N
@@ -102,15 +95,15 @@ namespace foo_out_avf
 
         // Windowed analysis frame + input spectra (packed real FFT: realp[0]=DC, imagp[0]=Nyquist).
         std::vector<float> fL, fR;         // length N
-        std::vector<float> Lr, Li, Rr, Ri; // length kHalf
+        std::vector<float> Lr, Li, Rr, Ri; // length half
 
         // Output spectra per channel + overlap-add accumulators + a real scratch buffer.
-        std::vector<float> outRe[CH_COUNT], outIm[CH_COUNT]; // length kHalf
+        std::vector<float> outRe[CH_COUNT], outIm[CH_COUNT]; // length half
         std::vector<float> ola[CH_COUNT];                    // length N
         std::vector<float> scratch;                          // length N
 
         // Smoothed inter-channel statistics per bin.
-        std::vector<float> sLL, sRR, sCre, sCim; // length kHalf
+        std::vector<float> sLL, sRR, sCre, sCim; // length half
 
         // Rear decorrelators (two cascaded all-passes each; distinct delays L vs R).
         Allpass apRL[2];
@@ -122,44 +115,54 @@ namespace foo_out_avf
         size_t fifoMask = 0;
         size_t fHead = 0, fTail = 0; // free-running frame counters
 
-        void build(uint32_t sampleRate);
+        void build(uint32_t sampleRate, const Params &params);
         void clearState();
         void processFrame();
     };
 
-    void StereoUpmixer::Impl::build(uint32_t sampleRate) {
+    void StereoUpmixer::Impl::build(uint32_t sampleRate, const Params &params) {
         sr = sampleRate;
+        // FFT window: only 1024/2048/4096 are offered; anything else snaps to 2048. hop = N/4 (75%
+        // overlap), half = N/2 (real-FFT bins). All buffers below are sized to N/half, so a different N
+        // just reallocates — nothing else in the kernel assumes a fixed size.
+        switch (params.fftSize) {
+            case 1024: N = 1024; log2N = 10; break;
+            case 4096: N = 4096; log2N = 12; break;
+            default:   N = 2048; log2N = 11; break;
+        }
+        hop = N / 4;
+        half = N / 2;
         if (setup) {
             vDSP_destroy_fftsetup(setup);
             setup = nullptr;
         }
-        setup = vDSP_create_fftsetup(kLog2N, kFFTRadix2);
+        setup = vDSP_create_fftsetup(log2N, kFFTRadix2);
 
         // sqrt-Hann window (periodic; w² = Hann, which is COLA at 75% overlap).
-        win.assign(kN, 0.0f);
-        for (int n = 0; n < kN; ++n) {
-            const double hann = 0.5 * (1.0 - std::cos(2.0 * kPi * (double)n / (double)kN));
+        win.assign(N, 0.0f);
+        for (int n = 0; n < N; ++n) {
+            const double hann = 0.5 * (1.0 - std::cos(2.0 * kPi * (double)n / (double)N));
             win[n] = (float)std::sqrt(hann);
         }
         // Overlap-add normalisation: Σ w² at the hop grid (constant for a COLA window/overlap).
         double winNorm = 0.0;
-        for (int p = 0; p < kN; p += kHop) {
+        for (int p = 0; p < N; p += hop) {
             winNorm += (double)win[p] * (double)win[p];
         }
         if (winNorm <= 0.0) {
             winNorm = 1.0;
         }
-        olaScale = (float)(1.0 / (2.0 * (double)kN * winNorm));
+        olaScale = (float)(1.0 / (2.0 * (double)N * winNorm));
 
         const double tau = std::max(1e-4, kSmoothTau);
-        alpha = (float)(1.0 - std::exp(-(double)kHop / ((double)std::max<uint32_t>(sr, 1) * tau)));
+        alpha = (float)(1.0 - std::exp(-(double)hop / ((double)std::max<uint32_t>(sr, 1) * tau)));
 
         // Bass-management crossover: smooth (log-spaced raised-cosine) power-complementary split. mains
         // get hpGain, the LFE gets lpGain, hpGain² + lpGain² = 1.
         const double srd = (double)std::max<uint32_t>(sr, 1);
         // Power-complementary log raised-cosine crossover gain at bin k for a [lo, hi] transition.
         auto crossoverHp = [&](int k, double lo, double hi) -> float {
-            const double f = (double)k * srd / (double)kN;
+            const double f = (double)k * srd / (double)N;
             double t;
             if (f <= lo) {
                 t = 0.0;
@@ -170,33 +173,41 @@ namespace foo_out_avf
             }
             return (float)std::sin(t * kPi * 0.5);
         };
-        hpGain.assign(kHalf, 0.0f);
-        lpGain.assign(kHalf, 0.0f);
-        for (int k = 0; k < kHalf; ++k) {
-            // High-pass floored at −12 dB: below the crossover the mains keep kHpFloor of their low end
-            // (mapping the raw [0,1] crossover onto [kHpFloor, 1]) rather than dropping to zero.
-            hpGain[k] = kHpFloor + (1.0f - kHpFloor) * crossoverHp(k, kXoverLo, kXoverHi);
+        // Configurable crossover from Params: centre frequency + Q (steepness) → a [lo, hi] transition
+        // band (Q 1.0 ⇒ ±half-octave, i.e. the original 80–160 Hz around 113 Hz); and a floor so the mains
+        // keep `floor` of their low end below the band instead of dropping to zero (mapping the raw [0,1]
+        // crossover onto [floor, 1]).
+        const double q = std::max(0.05, (double)params.bassQ);
+        const double fc = std::max(1.0, (double)params.bassCutoffHz);
+        const double octHalf = 0.5 / q;               // half the transition width in octaves
+        const double lo = fc * std::pow(2.0, -octHalf);
+        const double hi = fc * std::pow(2.0, octHalf);
+        const float floor = (float)std::pow(10.0, (double)params.bassFloorDb / 20.0);
+        hpGain.assign(half, 0.0f);
+        lpGain.assign(half, 0.0f);
+        for (int k = 0; k < half; ++k) {
+            hpGain[k] = floor + (1.0f - floor) * crossoverHp(k, lo, hi);
             lpGain[k] = std::sqrt(std::max(0.0f, 1.0f - hpGain[k] * hpGain[k])); // power-complementary
         }
 
-        inL.assign(kN, 0.0f);
-        inR.assign(kN, 0.0f);
-        fL.assign(kN, 0.0f);
-        fR.assign(kN, 0.0f);
-        Lr.assign(kHalf, 0.0f);
-        Li.assign(kHalf, 0.0f);
-        Rr.assign(kHalf, 0.0f);
-        Ri.assign(kHalf, 0.0f);
-        scratch.assign(kN, 0.0f);
+        inL.assign(N, 0.0f);
+        inR.assign(N, 0.0f);
+        fL.assign(N, 0.0f);
+        fR.assign(N, 0.0f);
+        Lr.assign(half, 0.0f);
+        Li.assign(half, 0.0f);
+        Rr.assign(half, 0.0f);
+        Ri.assign(half, 0.0f);
+        scratch.assign(N, 0.0f);
         for (int ch = 0; ch < CH_COUNT; ++ch) {
-            outRe[ch].assign(kHalf, 0.0f);
-            outIm[ch].assign(kHalf, 0.0f);
-            ola[ch].assign(kN, 0.0f);
+            outRe[ch].assign(half, 0.0f);
+            outIm[ch].assign(half, 0.0f);
+            ola[ch].assign(N, 0.0f);
         }
-        sLL.assign(kHalf, 0.0f);
-        sRR.assign(kHalf, 0.0f);
-        sCre.assign(kHalf, 0.0f);
-        sCim.assign(kHalf, 0.0f);
+        sLL.assign(half, 0.0f);
+        sRR.assign(half, 0.0f);
+        sCre.assign(half, 0.0f);
+        sCim.assign(half, 0.0f);
 
         // Decorrelator delays: small (a few ms), co-prime, distinct between L and R.
         apRL[0].init(149, 0.7f);
@@ -206,7 +217,7 @@ namespace foo_out_avf
 
         // FIFO: a few blocks of headroom is plenty (the engine drains it every feed call).
         size_t cap = 1;
-        while (cap < (size_t)(kN * 4)) {
+        while (cap < (size_t)(N * 4)) {
             cap <<= 1;
         }
         fifoFrames = cap;
@@ -239,19 +250,19 @@ namespace foo_out_avf
     // H finished 5.1 frames into the FIFO.
     void StereoUpmixer::Impl::processFrame() {
         // --- window + forward FFT of L and R --------------------------------------------------------
-        for (int n = 0; n < kN; ++n) {
+        for (int n = 0; n < N; ++n) {
             fL[n] = inL[n] * win[n];
             fR[n] = inR[n] * win[n];
         }
         DSPSplitComplex scL{Lr.data(), Li.data()};
         DSPSplitComplex scR{Rr.data(), Ri.data()};
-        vDSP_ctoz((const DSPComplex *)fL.data(), 2, &scL, 1, kHalf);
-        vDSP_ctoz((const DSPComplex *)fR.data(), 2, &scR, 1, kHalf);
-        vDSP_fft_zrip(setup, &scL, 1, kLog2N, kFFTDirection_Forward);
-        vDSP_fft_zrip(setup, &scR, 1, kLog2N, kFFTDirection_Forward);
+        vDSP_ctoz((const DSPComplex *)fL.data(), 2, &scL, 1, half);
+        vDSP_ctoz((const DSPComplex *)fR.data(), 2, &scR, 1, half);
+        vDSP_fft_zrip(setup, &scL, 1, log2N, kFFTDirection_Forward);
+        vDSP_fft_zrip(setup, &scR, 1, log2N, kFFTDirection_Forward);
 
         // --- DC (bin 0 real, f=0 → LFE) and Nyquist (bin 0 imag, f=sr/2 → mains) --------------------
-        const float hpDC = hpGain[0]; // = kHpFloor (−12 dB): the mains keep a little sub/DC
+        const float hpDC = hpGain[0]; // = floor (e.g. −12 dB): the mains keep a little sub/DC
         const float lpDC = lpGain[0]; // ≈0.97: the LFE takes the complementary remainder
         outRe[CH_FL][0] = Lr[0] * hpDC; outIm[CH_FL][0] = Li[0]; // Nyquist (imag) passes to the fronts
         outRe[CH_FR][0] = Rr[0] * hpDC; outIm[CH_FR][0] = Ri[0];
@@ -264,7 +275,7 @@ namespace foo_out_avf
         outRe[CH_RR][0] = 0.0f; outIm[CH_RR][0] = 0.0f;
 
         // --- per-bin Primary/Ambient extraction + bass management -----------------------------------
-        for (int k = 1; k < kHalf; ++k) {
+        for (int k = 1; k < half; ++k) {
             const float lr = Lr[k], li = Li[k], rr = Rr[k], ri = Ri[k];
             const float PL = lr * lr + li * li;
             const float PR = rr * rr + ri * ri;
@@ -340,16 +351,16 @@ namespace foo_out_avf
         // --- inverse FFT each channel, synthesis-window, overlap-add --------------------------------
         for (int ch = 0; ch < CH_COUNT; ++ch) {
             DSPSplitComplex so{outRe[ch].data(), outIm[ch].data()};
-            vDSP_fft_zrip(setup, &so, 1, kLog2N, kFFTDirection_Inverse);
-            vDSP_ztoc(&so, 1, (DSPComplex *)scratch.data(), 2, kHalf);
+            vDSP_fft_zrip(setup, &so, 1, log2N, kFFTDirection_Inverse);
+            vDSP_ztoc(&so, 1, (DSPComplex *)scratch.data(), 2, half);
             float *acc = ola[ch].data();
-            for (int n = 0; n < kN; ++n) {
+            for (int n = 0; n < N; ++n) {
                 acc[n] += scratch[n] * win[n];
             }
         }
 
         // --- emit the H now-complete frames (decorrelating the rears), then slide the OLA by H ------
-        for (int f = 0; f < kHop; ++f) {
+        for (int f = 0; f < hop; ++f) {
             float *slot = fifo.data() + (fTail & fifoMask) * CH_COUNT;
             slot[CH_FL] = ola[CH_FL][f] * olaScale;
             slot[CH_FR] = ola[CH_FR][f] * olaScale;
@@ -368,8 +379,8 @@ namespace foo_out_avf
         }
         for (int ch = 0; ch < CH_COUNT; ++ch) {
             float *acc = ola[ch].data();
-            std::memmove(acc, acc + kHop, (size_t)(kN - kHop) * sizeof(float));
-            std::memset(acc + (kN - kHop), 0, (size_t)kHop * sizeof(float));
+            std::memmove(acc, acc + hop, (size_t)(N - hop) * sizeof(float));
+            std::memset(acc + (N - hop), 0, (size_t)hop * sizeof(float));
         }
     }
 
@@ -384,8 +395,8 @@ namespace foo_out_avf
         }
     }
 
-    void StereoUpmixer::reset(uint32_t sampleRate) {
-        _impl->build(sampleRate);
+    void StereoUpmixer::reset(uint32_t sampleRate, const Params &params) {
+        _impl->build(sampleRate, params);
     }
 
     void StereoUpmixer::clear() {
@@ -399,9 +410,10 @@ namespace foo_out_avf
         if (!p->setup || frames == 0) {
             return; // not built yet (reset() not called) — nothing to do
         }
+        const int N = p->N, hop = p->hop;
         size_t i = 0;
         while (i < frames) {
-            const size_t space = (size_t)(kN - p->inFill);
+            const size_t space = (size_t)(N - p->inFill);
             const size_t take = std::min(space, frames - i);
             for (size_t j = 0; j < take; ++j) {
                 p->inL[p->inFill + j] = interleavedLR[2 * (i + j) + 0];
@@ -409,12 +421,12 @@ namespace foo_out_avf
             }
             p->inFill += (int)take;
             i += take;
-            if (p->inFill == kN) {
+            if (p->inFill == N) {
                 p->processFrame();
                 // Keep the last (N − H) samples as the overlap for the next block.
-                std::memmove(p->inL.data(), p->inL.data() + kHop, (size_t)(kN - kHop) * sizeof(float));
-                std::memmove(p->inR.data(), p->inR.data() + kHop, (size_t)(kN - kHop) * sizeof(float));
-                p->inFill = kN - kHop;
+                std::memmove(p->inL.data(), p->inL.data() + hop, (size_t)(N - hop) * sizeof(float));
+                std::memmove(p->inR.data(), p->inR.data() + hop, (size_t)(N - hop) * sizeof(float));
+                p->inFill = N - hop;
             }
         }
     }
@@ -442,7 +454,7 @@ namespace foo_out_avf
         // One analysis block — the dominant, common-to-all-channels latency. The rear-decorrelation
         // all-passes add a further small, frequency-dependent group delay to the REARS only; it's left
         // out here (it's not a flat frame count, and a few-ms rear-only skew doesn't affect A/V sync).
-        return (size_t)kN;
+        return (size_t)_impl->N;
     }
 
 } // namespace foo_out_avf

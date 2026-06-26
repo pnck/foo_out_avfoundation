@@ -86,6 +86,15 @@ namespace
 + (double)lfeGainDb { return cur().lfeGainDb; }
 + (void)setLfeGainDb:(double)v { Layout l = cur(); l.lfeGainDb = v; put(l); }
 
++ (double)bassFloorDb { return v3d_config::dsp_params().bassFloorDb; }
++ (void)setBassFloorDb:(double)v { auto d = v3d_config::dsp_params(); d.bassFloorDb = v; v3d_config::set_dsp_params(d); }
++ (double)bassCutoffHz { return v3d_config::dsp_params().bassCutoffHz; }
++ (void)setBassCutoffHz:(double)v { auto d = v3d_config::dsp_params(); d.bassCutoffHz = v; v3d_config::set_dsp_params(d); }
++ (double)bassQ { return v3d_config::dsp_params().bassQ; }
++ (void)setBassQ:(double)v { auto d = v3d_config::dsp_params(); d.bassQ = v; v3d_config::set_dsp_params(d); }
++ (NSInteger)fftSize { return v3d_config::dsp_params().fftSize; }
++ (void)setFftSize:(NSInteger)v { auto d = v3d_config::dsp_params(); d.fftSize = (int)v; v3d_config::set_dsp_params(d); }
+
 + (NSArray<NSArray<NSNumber *> *> *)speakerPositions {
     const v3d_config::SpeakerPositions s = v3d_config::compute_speakers(cur());
     auto pt = [](const v3d_config::Vec3 &v) {

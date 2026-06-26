@@ -216,6 +216,7 @@ static OSStatus v3d_default_output_changed(AudioObjectID inObjectID, UInt32 inNu
     V3DShared *_shared;                   // heap-owned; render blocks capture a raw pointer (no self)
 
     unsigned long long _seenLayoutGen; // last v3d_config layout generation we applied (live pick-up gate)
+    unsigned long long _seenDspGen;    // last v3d_config DSP-params generation built into the upmixer
     uint32_t _channelCount;            // number of VIRTUAL speakers = number of sources/rings
     uint32_t _inputChannels;           // number of channels foobar feeds (may differ from _channelCount
                                        // when we upmix stereo → 5.1)
@@ -253,6 +254,7 @@ static OSStatus v3d_default_output_changed(AudioObjectID inObjectID, UInt32 inNu
     _upmixActive = false;
     _engineFailed = false;
     _seenLayoutGen = 0;
+    _seenDspGen = 0;
     _diagFeed = 0;
     _isEnabled = false;
     _isPaused = false;
@@ -407,8 +409,15 @@ static OSStatus v3d_default_output_changed(AudioObjectID inObjectID, UInt32 inNu
     _channelCount = channels;
     _upmixActive = (channels != inputChannels);
     if (_upmixActive) {
-        _upmixer.reset(sampleRate);
+        const v3d_config::DspParams dsp = v3d_config::dsp_params();
+        foo_out_avf::StereoUpmixer::Params p;
+        p.bassFloorDb = (float)dsp.bassFloorDb;
+        p.bassCutoffHz = (float)dsp.bassCutoffHz;
+        p.bassQ = (float)dsp.bassQ;
+        p.fftSize = dsp.fftSize;
+        _upmixer.reset(sampleRate, p);
     }
+    _seenDspGen = v3d_config::dsp_generation();
     _shared->sampleRate = sampleRate;
     _shared->primed.store(false, std::memory_order_relaxed);
 
@@ -626,6 +635,17 @@ static OSStatus v3d_default_output_changed(AudioObjectID inObjectID, UInt32 inNu
     // sources. Cheap atomic compare every feed; the actual re-apply only runs when the user edited.
     if (v3d_config::layout_generation() != _seenLayoutGen) {
         [self applyLayout];
+    }
+
+    // DSP params (bass-management / FFT window) changed: rebuild the upmixer + graph. Heavy but rare —
+    // gated by the generation so steady-state feeds skip it, and only relevant while we're upmixing.
+    if (_upmixActive && v3d_config::dsp_generation() != _seenDspGen) {
+        const bool wasRunning = _engine.isRunning;
+        if (wasRunning) {
+            [_engine stop];
+        }
+        [self rebuildGraphForSampleRate:_shared->sampleRate inputChannels:_inputChannels];
+        [self startEngineIfReady];
     }
 
     const size_t freeFrames = [self freeFrames];

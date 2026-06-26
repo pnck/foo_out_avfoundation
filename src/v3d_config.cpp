@@ -46,6 +46,11 @@ namespace foo_out_avf
             constexpr const char *K_CENTER_GAIN = "foo_out_avf.center.gain_db";
             constexpr const char *K_LFE_GAIN = "foo_out_avf.lfe.gain_db";
 
+            constexpr const char *K_BASS_FLOOR = "foo_out_avf.bass.floor_db";
+            constexpr const char *K_BASS_CUTOFF = "foo_out_avf.bass.cutoff_hz";
+            constexpr const char *K_BASS_Q = "foo_out_avf.bass.q";
+            constexpr const char *K_FFT_SIZE = "foo_out_avf.fft.size";
+
             fb2k::configStore::ptr store() { return fb2k::configStore::get(); }
 
             std::mutex g_mutex;
@@ -55,6 +60,11 @@ namespace foo_out_avf
             Layout g_previewLayout;
             std::atomic<unsigned long long> g_generation{0};
             std::atomic<unsigned long long> g_modeGeneration{0};
+
+            std::mutex g_dspMutex;
+            bool g_dspLoaded = false;
+            DspParams g_dsp;
+            std::atomic<unsigned long long> g_dspGeneration{0};
 
             // Pull the layout out of configStore (defaults from default_layout()). Caller holds g_mutex.
             void load_locked() {
@@ -152,6 +162,44 @@ namespace foo_out_avf
 
         unsigned long long mode_generation() {
             return g_modeGeneration.load(std::memory_order_acquire);
+        }
+
+        DspParams default_dsp_params() {
+            // −12 dB mains floor, crossover centred at 113 Hz with Q 1.0 (≈ the original 80–160 Hz band),
+            // 2048-pt FFT. These reproduce the previously-hardcoded behaviour.
+            return DspParams{-12.0, 113.0, 1.0, 2048};
+        }
+
+        DspParams dsp_params() {
+            std::lock_guard<std::mutex> lock(g_dspMutex);
+            if (!g_dspLoaded) {
+                const DspParams d = default_dsp_params();
+                auto s = store();
+                g_dsp.bassFloorDb = s->getConfigFloat(K_BASS_FLOOR, d.bassFloorDb);
+                g_dsp.bassCutoffHz = s->getConfigFloat(K_BASS_CUTOFF, d.bassCutoffHz);
+                g_dsp.bassQ = s->getConfigFloat(K_BASS_Q, d.bassQ);
+                g_dsp.fftSize = (int)s->getConfigInt(K_FFT_SIZE, d.fftSize);
+                g_dspLoaded = true;
+            }
+            return g_dsp;
+        }
+
+        void set_dsp_params(const DspParams &p) {
+            {
+                std::lock_guard<std::mutex> lock(g_dspMutex);
+                g_dsp = p;
+                g_dspLoaded = true;
+                auto s = store();
+                s->setConfigFloat(K_BASS_FLOOR, p.bassFloorDb);
+                s->setConfigFloat(K_BASS_CUTOFF, p.bassCutoffHz);
+                s->setConfigFloat(K_BASS_Q, p.bassQ);
+                s->setConfigInt(K_FFT_SIZE, p.fftSize);
+            }
+            g_dspGeneration.fetch_add(1, std::memory_order_release);
+        }
+
+        unsigned long long dsp_generation() {
+            return g_dspGeneration.load(std::memory_order_acquire);
         }
 
         Layout layout() {
