@@ -4,7 +4,7 @@
 //
 //  Read-only SceneKit preview of the virtual speaker rig: the listener at the origin and the six
 //  virtual speakers (FL, FR, C, LFE, RL, RR) at the positions the engine actually renders (fed from
-//  V3DConfig.speakerPositions — the same geometry). Orbit the camera to inspect; you place speakers
+//  VSurroundConfig.speakerPositions — the same geometry). Orbit the camera to inspect; you place speakers
 //  with the 2D stage + sliders, not by dragging here (true-3D dragging is ambiguous). Feedback only.
 //
 

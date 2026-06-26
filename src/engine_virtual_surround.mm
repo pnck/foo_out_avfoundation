@@ -1,8 +1,8 @@
 //
-//  engine_virtual_3d.mm
+//  engine_virtual_surround.mm
 //  foo_out_avfoundation
 //
-//  V3D positional backend — a VIRTUAL SPEAKER RIG over headphones, the way real headphone-surround
+//  VSurround positional backend — a VIRTUAL SPEAKER RIG over headphones, the way real headphone-surround
 //  products (Apple "Spatialize Stereo", Dolby Atmos for headphones, Waves Nx, …) work. Each content
 //  channel is deinterleaved into its own mono AVAudioSourceNode, positioned at a virtual loudspeaker,
 //  and all of them feed one AVAudioEnvironmentNode rendering with HRTFHQ. The listener sits at the
@@ -20,7 +20,7 @@
 //  FEED MODEL — a PULL graph, unlike the default backend's push into AVSampleBufferAudioRenderer.
 //  Each AVAudioSourceNode pulls audio from a real-time render thread; foobar2000 pushes from its
 //  playback thread. They meet at one single-producer/single-consumer lock-free ring PER channel
-//  (V3DChannelRing), all fed in lockstep. We keep the SAME shallow-sink contract as
+//  (VSurroundChannelRing), all fed in lockstep. We keep the SAME shallow-sink contract as
 //  engine_sys_spatialized.mm — take only enough to top a target lead (partial consumption), prime a
 //  small lead before draining, batch (kMinFeed) so we never dribble, floor the lead by the output
 //  device's transport type — but here the "queue" is our rings and "start the clock" is the shared
@@ -36,8 +36,8 @@
 //  observe a half-updated rig during a drag; inaudible for smooth edits.)
 //
 
-#import "engine_virtual_3d.h"
-#import "v3d_config.h"
+#import "engine_virtual_surround.h"
+#import "vsurround_config.h"
 #import <AVFoundation/AVFoundation.h>
 #import <AVFAudio/AVFAudio.h>
 #import <CoreAudio/CoreAudio.h>
@@ -50,12 +50,12 @@
 #include <cstring>
 
 #include "common/lead.h" // shared fsec / lead floors / currentOutputFloor — DO NOT copy-paste
-#include "dsp_upmix.h" // clean-room stereo → 5.1 upmix (V3D-only; feeds all six virtual speakers)
+#include "dsp_upmix.h" // clean-room stereo → 5.1 upmix (VSurround-only; feeds all six virtual speakers)
 
 // This TU is not inside namespace foo_out_avf (the @implementation is ObjC), so alias the config
-// namespace to keep the v3d_config:: call sites short, and bring the shared lead-policy names
+// namespace to keep the vsurround_config:: call sites short, and bring the shared lead-policy names
 // (fsec, kPrime, currentOutputFloor, kDefaultOutputDeviceAddr, …) into scope unqualified.
-namespace v3d_config = foo_out_avf::v3d_config;
+namespace vsurround_config = foo_out_avf::vsurround_config;
 using namespace foo_out_avf::lead;
 
 #ifndef AVAudio3DPointMake
@@ -66,16 +66,16 @@ using namespace foo_out_avf::lead;
 #endif
 
 #ifdef NDEBUG
-#define V3D_DIAG(...) ((void)0)
+#define VSURROUND_DIAG(...) ((void)0)
 #else
-#define V3D_DIAG(...) [self logMessage:__VA_ARGS__]
+#define VSURROUND_DIAG(...) [self logMessage:__VA_ARGS__]
 #endif
 
 namespace
 {
     // The lead policy (fsec, ms, the floors, kDefaultOutputDeviceAddr, currentOutputFloor) is shared
     // with engine_sys_spatialized.mm via common/lead.h (in scope through the using-directive
-    // above) — NOT copy-pasted. Only V3D-specific helpers live here.
+    // above) — NOT copy-pasted. Only VSurround-specific helpers live here.
 
     static size_t nextPow2(size_t n) {
         size_t p = 1;
@@ -86,24 +86,24 @@ namespace
     }
 
     // How many VIRTUAL speakers to build for a given input channel count. Stereo is upmixed to 5.1 so
-    // the rear pair / center / LFE aren't dead (the V3D feature is meaningless if only the front pair
+    // the rear pair / center / LFE aren't dead (the VSurround feature is meaningless if only the front pair
     // plays); everything else maps its content channels straight onto speakers (no upmix). Mono stays
     // mono (a single center speaker), matching speakerForChannel's count==1 case.
     static uint32_t virtualChannelsForInput(uint32_t inputChannels) {
         return (inputChannels == 2) ? foo_out_avf::dsp::StereoUpmixer::kOutChannels : inputChannels;
     }
 
-    // The virtual speaker geometry (pair distance/spacing/azimuth/elevation → XYZ) lives in v3d_config
+    // The virtual speaker geometry (pair distance/spacing/azimuth/elevation → XYZ) lives in vsurround_config
     // so the engine and the UI preview share one source of truth. Here we only convert and map content
     // channels onto the six computed positions.
-    static AVAudio3DPoint pointFromVec(const v3d_config::Vec3 &v) {
+    static AVAudio3DPoint pointFromVec(const vsurround_config::Vec3 &v) {
         return AVAudio3DPointMake((float)v.x, (float)v.y, (float)v.z);
     }
 
     // Which virtual speaker a given content channel index drives, by total channel count. Standard
     // interleave orders: 2.0 = FL FR; 5.0 = FL FR FC BL BR; 5.1 = FL FR FC LFE BL BR. Unusual / >6
     // counts fall back to the 5.1 order with extra channels folded onto the rear pair.
-    static AVAudio3DPoint speakerForChannel(const v3d_config::SpeakerPositions &s, uint32_t count, uint32_t idx) {
+    static AVAudio3DPoint speakerForChannel(const vsurround_config::SpeakerPositions &s, uint32_t count, uint32_t idx) {
         switch (count) {
         case 1:
             return pointFromVec(s.c); // mono → center
@@ -140,7 +140,7 @@ namespace
     }
 
     // The per-group gain (dB) for a given channel, mirroring speakerForChannel's channel→speaker map.
-    static double gainDbForChannel(const v3d_config::Layout &L, uint32_t count, uint32_t idx) {
+    static double gainDbForChannel(const vsurround_config::Layout &L, uint32_t count, uint32_t idx) {
         switch (count) {
         case 1:
             return L.centerGainDb;
@@ -167,7 +167,7 @@ namespace
     // One ring per content channel (mono float32). `write`/`read` are free-running sample counters
     // (never wrap in any realistic runtime), indexed into `buf` via `& mask`. Reconfigured only while
     // the engine is stopped, so buf/capacity/mask are stable whenever the render block runs.
-    struct V3DChannelRing {
+    struct VSurroundChannelRing {
         std::vector<float> buf;
         size_t capacity = 0; // power of two, in samples (== mono frames)
         size_t mask = 0;
@@ -182,29 +182,29 @@ namespace
 
     // Shared across all channel render blocks (one instance). primed/paused gate draining identically
     // for every channel so the rig stays phase-aligned.
-    struct V3DShared {
+    struct VSurroundShared {
         std::atomic<bool> primed{false}; // false until the prime lead is banked → render outputs silence
         std::atomic<bool> paused{false}; // pause freezes the queues: render outputs silence, no drain
         uint32_t sampleRate = 0;
     };
 } // namespace
 
-@interface AVFVirtual3DBackend ()
+@interface AVFVirtualSurroundBackend ()
 - (void)updateDeviceFloor;
 @end
 
-static OSStatus v3d_default_output_changed(AudioObjectID inObjectID, UInt32 inNumberAddresses,
+static OSStatus vsurround_default_output_changed(AudioObjectID inObjectID, UInt32 inNumberAddresses,
                                            const AudioObjectPropertyAddress *inAddresses, void *clientData) {
     (void)inObjectID;
     (void)inNumberAddresses;
     (void)inAddresses;
     @autoreleasepool {
-        [(__bridge AVFVirtual3DBackend *)clientData updateDeviceFloor];
+        [(__bridge AVFVirtualSurroundBackend *)clientData updateDeviceFloor];
     }
     return noErr;
 }
 
-@implementation AVFVirtual3DBackend {
+@implementation AVFVirtualSurroundBackend {
     void (*_logCallback)(const char *);
 
     AVAudioEngine *_engine;
@@ -212,11 +212,11 @@ static OSStatus v3d_default_output_changed(AudioObjectID inObjectID, UInt32 inNu
     NSMutableArray<AVAudioSourceNode *> *_sources; // one per content channel (strong owner under ARC)
     AVAudioFormat *_monoFormat;                    // mono float32 at the current sample rate (every source)
 
-    std::vector<V3DChannelRing *> _rings; // one per channel; render blocks capture raw pointers
-    V3DShared *_shared;                   // heap-owned; render blocks capture a raw pointer (no self)
+    std::vector<VSurroundChannelRing *> _rings; // one per channel; render blocks capture raw pointers
+    VSurroundShared *_shared;                   // heap-owned; render blocks capture a raw pointer (no self)
 
-    unsigned long long _seenLayoutGen; // last v3d_config layout generation we applied (live pick-up gate)
-    unsigned long long _seenDspGen;    // last v3d_config DSP-params generation built into the upmixer
+    unsigned long long _seenLayoutGen; // last vsurround_config layout generation we applied (live pick-up gate)
+    unsigned long long _seenDspGen;    // last vsurround_config DSP-params generation built into the upmixer
     uint32_t _channelCount;            // number of VIRTUAL speakers = number of sources/rings
     uint32_t _inputChannels;           // number of channels foobar feeds (may differ from _channelCount
                                        // when we upmix stereo → 5.1)
@@ -238,7 +238,7 @@ static OSStatus v3d_default_output_changed(AudioObjectID inObjectID, UInt32 inNu
     // speaker layout, not from a single source position.
     AVAudio3DPoint _listenerPosition;
     AVAudio3DAngularOrientation _listenerOrientation;
-    // _isEnabled / _isPaused are synthesized from the readonly properties (see engine_virtual_3d.h).
+    // _isEnabled / _isPaused are synthesized from the readonly properties (see engine_virtual_surround.h).
 }
 
 - (instancetype)init {
@@ -259,7 +259,7 @@ static OSStatus v3d_default_output_changed(AudioObjectID inObjectID, UInt32 inNu
     _isEnabled = false;
     _isPaused = false;
 
-    _shared = new V3DShared();
+    _shared = new VSurroundShared();
     _sources = [NSMutableArray array];
 
     _listenerPosition = AVAudio3DPointMake(0, 0, 0);
@@ -280,13 +280,13 @@ static OSStatus v3d_default_output_changed(AudioObjectID inObjectID, UInt32 inNu
     _env.listenerAngularOrientation = _listenerOrientation;
 
     AudioObjectAddPropertyListener(kAudioObjectSystemObject, &kDefaultOutputDeviceAddr,
-                                   v3d_default_output_changed, (__bridge void *)self);
+                                   vsurround_default_output_changed, (__bridge void *)self);
     return self;
 }
 
 - (void)dealloc {
     AudioObjectRemovePropertyListener(kAudioObjectSystemObject, &kDefaultOutputDeviceAddr,
-                                      v3d_default_output_changed, (__bridge void *)self);
+                                      vsurround_default_output_changed, (__bridge void *)self);
     [self disable]; // stops the engine → quiesces the render thread before we free the rings
     [self destroyRings];
     if (_shared) {
@@ -340,13 +340,13 @@ static OSStatus v3d_default_output_changed(AudioObjectID inObjectID, UInt32 inNu
 - (void)updateDeviceFloor {
     const fsec floor = currentOutputFloor();
     _deviceFloor.store(floor);
-    V3D_DIAG(@"[V3D] output device floor -> %.0f ms (target now %.0f ms)", ms(floor), ms([self targetLead]));
+    VSURROUND_DIAG(@"[VSurround] output device floor -> %.0f ms (target now %.0f ms)", ms(floor), ms([self targetLead]));
 }
 
 // --- graph / rings ---------------------------------------------------------
 
 - (void)destroyRings {
-    for (V3DChannelRing *r : _rings) {
+    for (VSurroundChannelRing *r : _rings) {
         delete r;
     }
     _rings.clear();
@@ -356,8 +356,8 @@ static OSStatus v3d_default_output_changed(AudioObjectID inObjectID, UInt32 inNu
 // (volume + 3D position) once connected to the environment; guard each setter with respondsToSelector
 // so an older macOS that lacks a knob degrades gracefully instead of throwing.
 - (void)applyLayout {
-    const v3d_config::Layout layout = v3d_config::layout();
-    const v3d_config::SpeakerPositions speakers = v3d_config::compute_speakers(layout);
+    const vsurround_config::Layout layout = vsurround_config::layout();
+    const vsurround_config::SpeakerPositions speakers = vsurround_config::compute_speakers(layout);
     _channelGain.assign(_channelCount, 1.0f);
     for (uint32_t c = 0; c < _channelCount && c < _sources.count; ++c) {
         id<AVAudioMixing> mix = (id<AVAudioMixing>)_sources[c];
@@ -377,7 +377,7 @@ static OSStatus v3d_default_output_changed(AudioObjectID inObjectID, UInt32 inNu
         }
         _channelGain[c] = (float)std::pow(10.0, gainDbForChannel(layout, _channelCount, c) / 20.0);
     }
-    _seenLayoutGen = v3d_config::layout_generation();
+    _seenLayoutGen = vsurround_config::layout_generation();
 }
 
 // Size each ring generously: the target lead plus ~1 s of headroom, so it always exceeds any lead the
@@ -397,7 +397,7 @@ static OSStatus v3d_default_output_changed(AudioObjectID inObjectID, UInt32 inNu
     // format is a common cause of a silent or refused graph. For mono the sample layout is identical.
     AVAudioFormat *fmt = [[AVAudioFormat alloc] initStandardFormatWithSampleRate:sampleRate channels:1];
     if (!fmt) {
-        V3D_DIAG(@"[V3D] Failed to create mono AVAudioFormat (%u Hz)", sampleRate);
+        VSURROUND_DIAG(@"[VSurround] Failed to create mono AVAudioFormat (%u Hz)", sampleRate);
         _monoFormat = nil;
         _channelCount = 0;
         _inputChannels = 0;
@@ -409,7 +409,7 @@ static OSStatus v3d_default_output_changed(AudioObjectID inObjectID, UInt32 inNu
     _channelCount = channels;
     _upmixActive = (channels != inputChannels);
     if (_upmixActive) {
-        const v3d_config::DspParams dspCfg = v3d_config::dsp_params();
+        const vsurround_config::DspParams dspCfg = vsurround_config::dsp_params();
         foo_out_avf::dsp::StereoUpmixer::Params p;
         p.bassFloorDb = (float)dspCfg.bassFloorDb;
         p.bassCutoffHz = (float)dspCfg.bassCutoffHz;
@@ -417,7 +417,7 @@ static OSStatus v3d_default_output_changed(AudioObjectID inObjectID, UInt32 inNu
         p.fftSize = dspCfg.fftSize;
         _upmixer.reset(sampleRate, p);
     }
-    _seenDspGen = v3d_config::dsp_generation();
+    _seenDspGen = vsurround_config::dsp_generation();
     _shared->sampleRate = sampleRate;
     _shared->primed.store(false, std::memory_order_relaxed);
 
@@ -429,13 +429,13 @@ static OSStatus v3d_default_output_changed(AudioObjectID inObjectID, UInt32 inNu
     [self destroyRings];
 
     const size_t capacity = [self ringCapacityForSampleRate:sampleRate];
-    V3DShared *shared = _shared; // captured raw (no self) by every render block
+    VSurroundShared *shared = _shared; // captured raw (no self) by every render block
 
     // AVAudioEngine attach/connect can throw NSExceptions; catch them so a graph failure surfaces as a
     // logged error instead of unwinding through foobar's C++ feed (which would wedge playback).
     @try {
     for (uint32_t c = 0; c < channels; ++c) {
-        V3DChannelRing *ring = new V3DChannelRing();
+        VSurroundChannelRing *ring = new VSurroundChannelRing();
         ring->buf.assign(capacity, 0.0f);
         ring->capacity = capacity;
         ring->mask = capacity - 1;
@@ -493,7 +493,7 @@ static OSStatus v3d_default_output_changed(AudioObjectID inObjectID, UInt32 inNu
         // freeSampleCount keep reporting room, foobar keeps offering, every feed re-enters this build and
         // re-throws — a 100%-CPU busy-loop on a persistently-failing graph. With the latch the backpressure
         // methods tell foobar to stop; a later successful (re)build clears it via startEngineIfReady.
-        [self logMessage:@"[V3D] graph build FAILED: %@ — %@", ex.name, ex.reason ?: @"(nil)"];
+        [self logMessage:@"[VSurround] graph build FAILED: %@ — %@", ex.name, ex.reason ?: @"(nil)"];
         _monoFormat = nil; // force a rebuild attempt if a genuinely new format ever arrives
         _channelCount = 0;
         _inputChannels = 0;
@@ -502,7 +502,7 @@ static OSStatus v3d_default_output_changed(AudioObjectID inObjectID, UInt32 inNu
     }
 
     [self applyLayout];
-    V3D_DIAG(@"[V3D] graph rebuilt: in=%u ch -> %u speakers%s @ %u Hz, ring=%zu samples/ch, target=%.0f ms",
+    VSURROUND_DIAG(@"[VSurround] graph rebuilt: in=%u ch -> %u speakers%s @ %u Hz, ring=%zu samples/ch, target=%.0f ms",
              inputChannels, channels, _upmixActive ? " (upmix)" : "", sampleRate, capacity,
              ms([self targetLead]));
     return true;
@@ -538,14 +538,14 @@ static OSStatus v3d_default_output_changed(AudioObjectID inObjectID, UInt32 inNu
         if (![_engine startAndReturnError:&err]) {
             // Log unconditionally (not the Debug-only macro): a start failure otherwise becomes an
             // indefinite SILENT stall (rings fill, backpressure goes 0, foobar stops feeding, no audio).
-            [self logMessage:@"[V3D] engine start FAILED: %@", err ?: @"(nil)"];
+            [self logMessage:@"[VSurround] engine start FAILED: %@", err ?: @"(nil)"];
             _engineFailed = true;
         } else {
             _engineFailed = false;
-            V3D_DIAG(@"[V3D] engine started (%u ch @ %u Hz)", _channelCount, _shared->sampleRate);
+            VSURROUND_DIAG(@"[VSurround] engine started (%u ch @ %u Hz)", _channelCount, _shared->sampleRate);
         }
     } @catch (NSException *ex) {
-        [self logMessage:@"[V3D] engine start EXCEPTION: %@ — %@", ex.name, ex.reason ?: @"(nil)"];
+        [self logMessage:@"[VSurround] engine start EXCEPTION: %@ — %@", ex.name, ex.reason ?: @"(nil)"];
         _engineFailed = true;
     }
 }
@@ -558,7 +558,7 @@ static OSStatus v3d_default_output_changed(AudioObjectID inObjectID, UInt32 inNu
     _isPaused = false;
     _shared->paused.store(false, std::memory_order_release);
     [self startEngineIfReady]; // no-op until the first feed establishes the format/graph
-    V3D_DIAG(@"[V3D] enabled (HRTFHQ virtual speaker rig)");
+    VSURROUND_DIAG(@"[VSurround] enabled (HRTFHQ virtual speaker rig)");
     return true;
 }
 
@@ -610,7 +610,7 @@ static OSStatus v3d_default_output_changed(AudioObjectID inObjectID, UInt32 inNu
     if (wasRunning) {
         [_engine stop];
     }
-    for (V3DChannelRing *r : _rings) {
+    for (VSurroundChannelRing *r : _rings) {
         r->read.store(0, std::memory_order_relaxed);
         r->write.store(0, std::memory_order_relaxed);
     }
@@ -638,13 +638,13 @@ static OSStatus v3d_default_output_changed(AudioObjectID inObjectID, UInt32 inNu
 
     // Live pick-up: if the preferences UI moved a speaker since we last applied, re-position the
     // sources. Cheap atomic compare every feed; the actual re-apply only runs when the user edited.
-    if (v3d_config::layout_generation() != _seenLayoutGen) {
+    if (vsurround_config::layout_generation() != _seenLayoutGen) {
         [self applyLayout];
     }
 
     // DSP params (bass-management / FFT window) changed: rebuild the upmixer + graph. Heavy but rare —
     // gated by the generation so steady-state feeds skip it, and only relevant while we're upmixing.
-    if (_upmixActive && v3d_config::dsp_generation() != _seenDspGen) {
+    if (_upmixActive && vsurround_config::dsp_generation() != _seenDspGen) {
         const bool wasRunning = _engine.isRunning;
         if (wasRunning) {
             [_engine stop];
@@ -695,7 +695,7 @@ static OSStatus v3d_default_output_changed(AudioObjectID inObjectID, UInt32 inNu
 
     const size_t nch = std::min<size_t>(srcChannels, _rings.size());
     for (size_t c = 0; c < nch; ++c) {
-        V3DChannelRing *r = _rings[c];
+        VSurroundChannelRing *r = _rings[c];
         const float gain = (c < _channelGain.size()) ? _channelGain[c] : 1.0f; // per-group gain, in samples
         const size_t w = r->write.load(std::memory_order_relaxed);
         for (size_t i = 0; i < produced; ++i) {
@@ -707,11 +707,11 @@ static OSStatus v3d_default_output_changed(AudioObjectID inObjectID, UInt32 inNu
     // Priming: once the banked lead reaches the (smaller) prime threshold, let the render blocks drain.
     if (!_shared->primed.load(std::memory_order_relaxed) && [self lead] >= [self primeLead]) {
         _shared->primed.store(true, std::memory_order_release);
-        V3D_DIAG(@"[V3D] primed: draining at lead=%.0f ms (target=%.0f ms)", ms([self lead]),
+        VSURROUND_DIAG(@"[VSurround] primed: draining at lead=%.0f ms (target=%.0f ms)", ms([self lead]),
                  ms([self targetLead]));
     }
     if ((_diagFeed++ % 64) == 0) {
-        V3D_DIAG(@"[V3D] feed #%llu take=%zu ch=%u lead=%.0f ms underruns=%llu",
+        VSURROUND_DIAG(@"[VSurround] feed #%llu take=%zu ch=%u lead=%.0f ms underruns=%llu",
                  (unsigned long long)_diagFeed, take, channels, ms([self lead]),
                  (unsigned long long)(_rings.empty() ? 0 : _rings[0]->underruns.load(std::memory_order_relaxed)));
     }

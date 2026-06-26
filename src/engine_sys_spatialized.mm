@@ -6,7 +6,7 @@
 //
 //  The DEFAULT output backend: AVSampleBufferAudioRenderer + AVSampleBufferRenderSynchronizer,
 //  the path that hands audio to macOS's system Spatial Audio (Control Center, head tracking).
-//  The C++ facade (engine.mm) selects this vs the V3D backend through the AVFOutputBackend protocol.
+//  The C++ facade (engine.mm) selects this vs the VSurround backend through the AVFOutputBackend protocol.
 //
 //  Output pipeline model (see README.md "How it works — the output pipeline contract"):
 //  foobar2000 is the DEEP buffer; this engine is a SHALLOW sink that keeps only a small
@@ -40,7 +40,7 @@
 #endif
 
 // The output-lead policy (fsec, the floors, currentOutputFloor, the device-change address) is shared
-// with engine_virtual_3d.mm via common/lead.h — bring its names into scope so the call sites
+// with engine_virtual_surround.mm via common/lead.h — bring its names into scope so the call sites
 // stay unqualified (fsec, kPrime, currentOutputFloor, kDefaultOutputDeviceAddr, …).
 using namespace foo_out_avf::lead;
 
@@ -591,7 +591,7 @@ static OSStatus avf_default_output_changed(AudioObjectID inObjectID, UInt32 inNu
 }
 
 // --- spatial ---------------------------------------------------------------
-// The system spatializer owns placement, so these positional setters are no-ops here (the V3D
+// The system spatializer owns placement, so these positional setters are no-ops here (the VSurround
 // backend is the one that wires them into HRTFHQ). Kept only to satisfy the AVFOutputBackend protocol.
 
 - (void)setListenerPosition:(float)x y:(float)y z:(float)z {

@@ -16,7 +16,7 @@ beside each other, selected at runtime by `OutputMode`:
 - **`engine_sys_spatialized.mm`** (`AVFSysSpatializedBackend`) — the default backend: `AVSampleBufferAudioRenderer`
   + `AVSampleBufferRenderSynchronizer`, the system Spatial Audio path (Control Center, head tracking).
   Everything below in this memo describes this backend.
-- **`engine_virtual_3d.h` / `.mm`** (`AVFVirtual3DBackend`) — the V3D backend: a VIRTUAL SPEAKER RIG.
+- **`engine_virtual_surround.h` / `.mm`** (`AVFVirtualSurroundBackend`) — the VSurround backend: a VIRTUAL SPEAKER RIG.
   Each content channel is deinterleaved into its own mono `AVAudioSourceNode`, positioned at a virtual
   loudspeaker location, all feeding one `AVAudioEnvironmentNode` (`HRTFHQ`). The listener sits at the
   origin; the user arranges the speakers. This preserves and spatializes the stereo/multichannel image
@@ -32,18 +32,18 @@ beside each other, selected at runtime by `OutputMode`:
   is the shared `primed` flag that lets the render blocks drain. Reconfiguration (format/channel-count
   change, flush) stops the engine first to quiesce the render thread, so the only concurrent access is
   the steady-state SPSC rings — no locks.
-- **`v3d_config.h` / `.cpp`** — the speaker-rig settings (output mode + the `Layout`: front/rear pairs
+- **`vsurround_config.h` / `.cpp`** — the speaker-rig settings (output mode + the `Layout`: front/rear pairs
   with {distance, spacing, azimuth, elevation}, mono centre + LFE positions) and the shared geometry
   (`compute_speakers`: layout → the six speaker XYZ). configStore-backed for persistence, with an
   in-memory cache + a `layout_generation()` counter: the UI's `set_layout` persists and bumps the
   generation; the engine watches it each feed and re-positions its sources live (no observer plumbing,
   no UI-thread node mutation, no configStore race — cache reads under one mutex).
-  **`v3d_config_bridge.h` / `.mm`** is its `V3DConfig` Objective-C face for the Swift UI (one class
+  **`vsurround_config_bridge.h` / `.mm`** is its `VSurroundConfig` Objective-C face for the Swift UI (one class
   property per layout field + `speakerPositions` for the preview).
 - **preferences UI** — Swift: `preferences_view_controller.swift` (the page), `stage_view.swift` (the
   top-down stage: drag the front/rear pair centres + mono centre/LFE around the listener, with derived
   speaker feedback dots), `scene_view.swift` (`SceneRigView`, live SceneKit preview of all six speakers).
-  Per-pair spacing/elevation and mono height are sliders. Every edit writes through `V3DConfig` → live.
+  Per-pair spacing/elevation and mono height are sliders. Every edit writes through `VSurroundConfig` → live.
   `preferences_page.mm` registers the fb2k `preferences_page` and instantiates the Swift controller by
   its `@objc` runtime name; `bridging_header.h` exposes the ObjC bridge to Swift.
 

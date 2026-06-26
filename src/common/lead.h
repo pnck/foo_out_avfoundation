@@ -2,7 +2,7 @@
 //  lead.h
 //  foo_out_avfoundation
 //
-//  Shared output-lead policy for BOTH backends (engine_sys_spatialized.mm, engine_virtual_3d.mm):
+//  Shared output-lead policy for BOTH backends (engine_sys_spatialized.mm, engine_virtual_surround.mm):
 //  the fsec currency type, the device-transport lead floors, and the CoreAudio query that picks the
 //  floor for the current default output device. This used to be copy-pasted into each backend — DON'T
 //  do that again (see AGENTS.md): one definition here, included by both, so the policy can never drift
@@ -27,7 +27,7 @@ namespace foo_out_avf
         // to/from the SDK boundaries (foobar's double seconds, CMTime, frame counts) at named casts.
         using fsec = std::chrono::duration<double>;
 
-        // Display helper: a duration's value in milliseconds, for the [AVF]/[V3D] log lines.
+        // Display helper: a duration's value in milliseconds, for the [AVF]/[VSurround] log lines.
         inline double ms(fsec s) { return std::chrono::duration<double, std::milli>(s).count(); }
 
         // Bank just this much before starting (prime), then keep filling to the full lead while playing.

@@ -6,4 +6,4 @@
 //  needs. (Passed to the Swift compiler via -import-objc-header in CMakeLists.)
 //
 
-#import "v3d_config_bridge.h"
+#import "vsurround_config_bridge.h"

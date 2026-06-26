@@ -2,7 +2,7 @@
 //  dsp_upmix.h
 //  foo_out_avfoundation
 //
-//  Clean-room stereo → 5.1 upmix, so the V3D virtual speaker rig is fed from all six speakers even
+//  Clean-room stereo → 5.1 upmix, so the VSurround virtual speaker rig is fed from all six speakers even
 //  when the source is plain stereo (the common case). Written from first principles for this project
 //  (Apache-2.0); it does NOT derive from FreeSurround (GPL-3.0) or any Dolby Pro Logic decoder.
 //
@@ -21,7 +21,7 @@
 //      flat magnitude) with distinct delays per side, for a diffuse/enveloping surround field rather
 //      than a phasey copy of the front.
 //
-//  THREADING / REAL-TIME — this runs on foobar2000's feed thread (engine_virtual_3d.mm's feedAudioData),
+//  THREADING / REAL-TIME — this runs on foobar2000's feed thread (engine_virtual_surround.mm's feedAudioData),
 //  NOT the AVAudioSourceNode render thread (which only memcpys the rings). So the heavy DSP is off the
 //  real-time path; buffers are still preallocated in reset() so steady-state push/pull don't allocate.
 //
@@ -45,7 +45,7 @@ namespace foo_out_avf::dsp
     public:
         static constexpr uint32_t kOutChannels = 6; // FL FR C LFE RL RR (5.1 interleave order)
 
-        // User-configurable DSP parameters (from v3d_config). The bass-management high-pass on the mains
+        // User-configurable DSP parameters (from vsurround_config). The bass-management high-pass on the mains
         // and the FFT window size; defaults reproduce the original hardcoded behavior.
         struct Params {
             float bassFloorDb = -12.0f;   // mains' low-end floor below the crossover (dB)

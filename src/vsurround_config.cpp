@@ -1,14 +1,14 @@
 //
-//  v3d_config.cpp
+//  vsurround_config.cpp
 //  foo_out_avfoundation
 //
-//  configStore-backed implementation of the V3D configuration. Keys are namespaced under "foo_out_avf."
+//  configStore-backed implementation of the VSurround configuration. Keys are namespaced under "foo_out_avf."
 //  so they don't collide with other components' settings. The layout is cached in memory behind a mutex
 //  (the read source for both the audio thread and the UI); configStore is touched only on first load
-//  and on writes, so the two threads never race on it. See v3d_config.h for the live-update contract.
+//  and on writes, so the two threads never race on it. See vsurround_config.h for the live-update contract.
 //
 
-#include "v3d_config.h"
+#include "vsurround_config.h"
 #include "foobar2000/SDK/configStore.h"
 
 #include <atomic>
@@ -17,7 +17,7 @@
 
 namespace foo_out_avf
 {
-    namespace v3d_config
+    namespace vsurround_config
     {
         namespace
         {
@@ -153,10 +153,10 @@ namespace foo_out_avf
         }
 
         OutputMode mode() {
-            return store()->getConfigInt(K_MODE, 0) == 1 ? OutputMode::Virtual3D : OutputMode::SystemSpatial;
+            return store()->getConfigInt(K_MODE, 0) == 1 ? OutputMode::VirtualSurround : OutputMode::SystemSpatial;
         }
         void set_mode(OutputMode m) {
-            store()->setConfigInt(K_MODE, m == OutputMode::Virtual3D ? 1 : 0);
+            store()->setConfigInt(K_MODE, m == OutputMode::VirtualSurround ? 1 : 0);
             g_modeGeneration.fetch_add(1, std::memory_order_release);
         }
 
@@ -242,5 +242,5 @@ namespace foo_out_avf
             return g_generation.load(std::memory_order_acquire);
         }
 
-    } // namespace v3d_config
+    } // namespace vsurround_config
 } // namespace foo_out_avf

@@ -19,7 +19,7 @@
 // The output-backend surface shared by every AVFoundation backend. The C++ facade (engine.mm)
 // holds an id<AVFOutputBackend> and picks the concrete backend by OutputMode:
 //   - AVFSysSpatializedBackend          (engine_sys_spatialized.mm)  — system Spatial Audio path (default)
-//   - AVFVirtual3DBackend  (engine_virtual_3d.mm)   — in-process HRTFHQ positional path (V3D)
+//   - AVFVirtualSurroundBackend  (engine_virtual_surround.mm)   — in-process HRTFHQ positional path (VSurround)
 @protocol AVFOutputBackend <NSObject>
 
 // Audio format setup — must be called before enable.
@@ -53,7 +53,7 @@
 - (float)getVolume;
 
 // Spatial positioning. The default backend keeps these as informational no-ops (the system
-// spatializer owns placement); the V3D backend wires them straight into the HRTFHQ renderer.
+// spatializer owns placement); the VSurround backend wires them straight into the HRTFHQ renderer.
 - (void)setListenerPosition:(float)x y:(float)y z:(float)z;
 - (void)setListenerOrientation:(float)yaw pitch:(float)pitch roll:(float)roll;
 - (void)setSourcePosition:(float)x y:(float)y z:(float)z;
@@ -88,7 +88,7 @@ namespace foo_out_avf
     // Which spatialization path the engine drives. Selected from config before enable().
     enum class OutputMode {
         SystemSpatial = 0, // AVSampleBufferAudioRenderer -> macOS system Spatial Audio (default)
-        Virtual3D = 1,     // AVAudioEngine + AVAudioEnvironmentNode (HRTFHQ) -> custom positioning
+        VirtualSurround = 1,     // AVAudioEngine + AVAudioEnvironmentNode (HRTFHQ) -> custom positioning
     };
 
     class AVFEngine {

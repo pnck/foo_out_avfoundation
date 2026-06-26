@@ -1,27 +1,27 @@
 //
-//  v3d_config_bridge.mm
+//  vsurround_config_bridge.mm
 //  foo_out_avfoundation
 //
-//  Bridges V3DConfig (ObjC, for Swift) onto foo_out_avf::v3d_config (C++/configStore). Each layout
+//  Bridges VSurroundConfig (ObjC, for Swift) onto foo_out_avf::vsurround_config (C++/configStore). Each layout
 //  setter is a read-modify-write of the whole Layout (it's tiny) so a single edited field still goes
 //  through set_layout — which persists and bumps the generation the engine watches.
 //
 
-#import "v3d_config_bridge.h"
-#import "v3d_config.h"
+#import "vsurround_config_bridge.h"
+#import "vsurround_config.h"
 
 using namespace foo_out_avf;
-using v3d_config::Layout;
+using vsurround_config::Layout;
 
 namespace
 {
-    Layout cur() { return v3d_config::layout(); }
-    void put(const Layout &l) { v3d_config::set_layout(l); }
+    Layout cur() { return vsurround_config::layout(); }
+    void put(const Layout &l) { vsurround_config::set_layout(l); }
 
     // Build a Layout from the 18-number value array the UI passes (geometry 0..13, gains 14..17).
     // Missing trailing values keep the factory default, so older/short arrays still work.
     Layout layoutFromValues(NSArray<NSNumber *> *v) {
-        Layout l = v3d_config::default_layout();
+        Layout l = vsurround_config::default_layout();
         if (v.count >= 14) {
             l.front = {v[0].doubleValue, v[1].doubleValue, v[2].doubleValue, v[3].doubleValue};
             l.rear = {v[4].doubleValue, v[5].doubleValue, v[6].doubleValue, v[7].doubleValue};
@@ -38,11 +38,11 @@ namespace
     }
 } // namespace
 
-@implementation V3DConfig
+@implementation VSurroundConfig
 
-+ (BOOL)virtual3DEnabled { return v3d_config::mode() == OutputMode::Virtual3D; }
-+ (void)setVirtual3DEnabled:(BOOL)v {
-    v3d_config::set_mode(v ? OutputMode::Virtual3D : OutputMode::SystemSpatial);
++ (BOOL)virtualSurroundEnabled { return vsurround_config::mode() == OutputMode::VirtualSurround; }
++ (void)setVirtualSurroundEnabled:(BOOL)v {
+    vsurround_config::set_mode(v ? OutputMode::VirtualSurround : OutputMode::SystemSpatial);
 }
 
 + (double)frontDistance { return cur().front.distance; }
@@ -86,25 +86,25 @@ namespace
 + (double)lfeGainDb { return cur().lfeGainDb; }
 + (void)setLfeGainDb:(double)v { Layout l = cur(); l.lfeGainDb = v; put(l); }
 
-+ (double)bassFloorDb { return v3d_config::dsp_params().bassFloorDb; }
-+ (void)setBassFloorDb:(double)v { auto d = v3d_config::dsp_params(); d.bassFloorDb = v; v3d_config::set_dsp_params(d); }
-+ (double)bassCutoffHz { return v3d_config::dsp_params().bassCutoffHz; }
-+ (void)setBassCutoffHz:(double)v { auto d = v3d_config::dsp_params(); d.bassCutoffHz = v; v3d_config::set_dsp_params(d); }
-+ (double)bassQ { return v3d_config::dsp_params().bassQ; }
-+ (void)setBassQ:(double)v { auto d = v3d_config::dsp_params(); d.bassQ = v; v3d_config::set_dsp_params(d); }
-+ (NSInteger)fftSize { return v3d_config::dsp_params().fftSize; }
-+ (void)setFftSize:(NSInteger)v { auto d = v3d_config::dsp_params(); d.fftSize = (int)v; v3d_config::set_dsp_params(d); }
++ (double)bassFloorDb { return vsurround_config::dsp_params().bassFloorDb; }
++ (void)setBassFloorDb:(double)v { auto d = vsurround_config::dsp_params(); d.bassFloorDb = v; vsurround_config::set_dsp_params(d); }
++ (double)bassCutoffHz { return vsurround_config::dsp_params().bassCutoffHz; }
++ (void)setBassCutoffHz:(double)v { auto d = vsurround_config::dsp_params(); d.bassCutoffHz = v; vsurround_config::set_dsp_params(d); }
++ (double)bassQ { return vsurround_config::dsp_params().bassQ; }
++ (void)setBassQ:(double)v { auto d = vsurround_config::dsp_params(); d.bassQ = v; vsurround_config::set_dsp_params(d); }
++ (NSInteger)fftSize { return vsurround_config::dsp_params().fftSize; }
++ (void)setFftSize:(NSInteger)v { auto d = vsurround_config::dsp_params(); d.fftSize = (int)v; vsurround_config::set_dsp_params(d); }
 
 + (NSArray<NSArray<NSNumber *> *> *)speakerPositions {
-    const v3d_config::SpeakerPositions s = v3d_config::compute_speakers(cur());
-    auto pt = [](const v3d_config::Vec3 &v) {
+    const vsurround_config::SpeakerPositions s = vsurround_config::compute_speakers(cur());
+    auto pt = [](const vsurround_config::Vec3 &v) {
         return @[ @(v.x), @(v.y), @(v.z) ];
     };
     return @[ pt(s.fl), pt(s.fr), pt(s.c), pt(s.lfe), pt(s.rl), pt(s.rr) ];
 }
 
 + (NSArray<NSNumber *> *)standard51Values {
-    const Layout d = v3d_config::default_layout();
+    const Layout d = vsurround_config::default_layout();
     return @[
         @(d.front.distance), @(d.front.spacingDeg), @(d.front.centerAzDeg), @(d.front.centerElDeg),
         @(d.rear.distance), @(d.rear.spacingDeg), @(d.rear.centerAzDeg), @(d.rear.centerElDeg),
@@ -114,17 +114,17 @@ namespace
     ];
 }
 
-+ (void)applyLayoutValues:(NSArray<NSNumber *> *)v mode:(BOOL)v3dEnabled {
-    v3d_config::set_layout(layoutFromValues(v)); // persist + clear preview + one generation bump
-    v3d_config::set_mode(v3dEnabled ? OutputMode::Virtual3D : OutputMode::SystemSpatial);
++ (void)applyLayoutValues:(NSArray<NSNumber *> *)v mode:(BOOL)vsurroundEnabled {
+    vsurround_config::set_layout(layoutFromValues(v)); // persist + clear preview + one generation bump
+    vsurround_config::set_mode(vsurroundEnabled ? OutputMode::VirtualSurround : OutputMode::SystemSpatial);
 }
 
 + (void)previewLayoutValues:(NSArray<NSNumber *> *)v {
-    v3d_config::set_preview(layoutFromValues(v)); // transient: engine renders it, not persisted
+    vsurround_config::set_preview(layoutFromValues(v)); // transient: engine renders it, not persisted
 }
 
 + (void)clearPreview {
-    v3d_config::clear_preview();
+    vsurround_config::clear_preview();
 }
 
 @end

@@ -230,7 +230,7 @@ target_link_libraries(foo_out_avfoundation PRIVATE
 
 # ---------------------------------------------------------------------------
 # Swift UI wiring. The Swift sources are part of the module (added above). Swift -> ObjC goes
-# through the bridging header (V3DConfig etc.). The reverse direction (ObjC++ -> Swift) is NOT done
+# through the bridging header (VSurroundConfig etc.). The reverse direction (ObjC++ -> Swift) is NOT done
 # through a Swift-emitted compatibility header: in one mixed Swift+ObjC++ module Ninja won't order
 # that generated header ahead of the ObjC++ compiles, so importing it races. The only ObjC++ -> Swift
 # touch point (preferences_page.mm instantiating the view controller) resolves the class by its

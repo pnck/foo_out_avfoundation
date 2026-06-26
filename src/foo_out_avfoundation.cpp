@@ -9,7 +9,7 @@
 #include "common/consts.hpp"
 #include "common/utils.hpp"
 #include "engine.h"
-#include "v3d_config.h"
+#include "vsurround_config.h"
 #include <vector>
 #include <span>
 #include <chrono>
@@ -50,7 +50,7 @@ namespace foo_out_avf
         bool is_active;
         bool is_paused;
         double m_buffer_length = 0.0;           // foobar's configured output buffer length (seconds)
-        unsigned long long m_seen_mode_gen = 0; // last v3d_config mode generation we acted on
+        unsigned long long m_seen_mode_gen = 0; // last vsurround_config mode generation we acted on
 
         // setMode recreates the backend, so the log callback and buffer length must be (re)installed on
         // the new one (else the logs fall back to NSLog instead of foobar's console). Volume is NOT
@@ -69,15 +69,15 @@ namespace foo_out_avf
         }
 
         // An output instance is long-lived, so it would never re-read the mode after the user toggles
-        // Virtual 3D in preferences. Watch the mode generation and rebuild the engine for the new
+        // Virtual Surround in preferences. Watch the mode generation and rebuild the engine for the new
         // backend in place (a brief gap — this is a deliberate switch). Called from update().
         void maybe_switch_mode() {
-            const unsigned long long gen = v3d_config::mode_generation();
+            const unsigned long long gen = vsurround_config::mode_generation();
             if (gen == m_seen_mode_gen) {
                 return;
             }
             m_seen_mode_gen = gen;
-            const OutputMode want = v3d_config::mode();
+            const OutputMode want = vsurround_config::mode();
             if (want == engine.mode()) {
                 return;
             }
@@ -116,9 +116,9 @@ namespace foo_out_avf
     public:
         AVFOutput(const GUID &p_device, double p_buffer_length, bool p_dither, t_uint32 p_bitdepth) : is_active(false), is_paused(false) {
             m_buffer_length = p_buffer_length;
-            // Pick the spatialization backend (system Spatial Audio vs V3D) from saved config.
-            configure_engine_for_mode(v3d_config::mode());
-            m_seen_mode_gen = v3d_config::mode_generation();
+            // Pick the spatialization backend (system Spatial Audio vs VSurround) from saved config.
+            configure_engine_for_mode(vsurround_config::mode());
+            m_seen_mode_gen = vsurround_config::mode_generation();
 
             if (engine.enable()) {
                 is_active = true;
@@ -198,7 +198,7 @@ namespace foo_out_avf
 
         void update(bool &p_ready) override {
             CallTimerHelper _t("update");
-            maybe_switch_mode(); // pick up a Virtual 3D on/off toggle made in preferences, live
+            maybe_switch_mode(); // pick up a Virtual Surround on/off toggle made in preferences, live
             // We are a shallow sink: ready iff there's room under the target lead.
             p_ready = is_active && engine.canAcceptMore();
         }
@@ -207,7 +207,7 @@ namespace foo_out_avf
         //! offer a right-sized chunk instead of over-offering and getting a partial take.
         size_t update_v2() override {
             CallTimerHelper _t("update_v2");
-            maybe_switch_mode(); // pick up a Virtual 3D on/off toggle made in preferences, live
+            maybe_switch_mode(); // pick up a Virtual Surround on/off toggle made in preferences, live
             return is_active ? engine.freeSampleCount() : 0;
         }
 

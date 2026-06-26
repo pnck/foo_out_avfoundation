@@ -1,8 +1,8 @@
 //
-//  v3d_config.h
+//  vsurround_config.h
 //  foo_out_avfoundation
 //
-//  Persisted + live configuration for the output: which spatialization mode to use, and (for V3D) the
+//  Persisted + live configuration for the output: which spatialization mode to use, and (for VSurround) the
 //  VIRTUAL SPEAKER RIG the user arranges. Backed by fb2k's configStore (SQLite k/v) for persistence,
 //  with an in-memory cached copy + a generation counter so the running engine can pick up live edits
 //  from the preferences UI without an observer/notification dance:
@@ -13,7 +13,7 @@
 //    cache); that's safe only because maybe_switch_mode() gates on the atomic mode generation first, so
 //    the playback thread reads mode() at most once per actual toggle. configStore is itself thread-safe.
 //
-//  Read from C++ (the engine) directly, and from the Swift UI via the V3DConfig Objective-C bridge.
+//  Read from C++ (the engine) directly, and from the Swift UI via the VSurroundConfig Objective-C bridge.
 //
 
 #pragma once
@@ -22,7 +22,7 @@
 
 namespace foo_out_avf
 {
-    namespace v3d_config
+    namespace vsurround_config
     {
         struct Vec3 {
             double x, y, z;
@@ -41,7 +41,7 @@ namespace foo_out_avf
         // The whole rig: a front pair + a rear pair, plus a freely-placed mono center and LFE, with a
         // per-group gain (dB; 0 = unity) so the user can compensate for the distance attenuation that
         // makes far speakers quiet. The gain is applied to the samples in the feed path (see
-        // engine_virtual_3d.mm's _channelGain), NOT to the source node's mixer volume — AVAudioMixing
+        // engine_virtual_surround.mm's _channelGain), NOT to the source node's mixer volume — AVAudioMixing
         // clamps volume near unity, so a mixer-volume boost wouldn't take.
         struct Layout {
             SpeakerPair front;
@@ -108,9 +108,9 @@ namespace foo_out_avf
         unsigned long long layout_generation();
 
         // Monotonic counter, bumped on every set_mode. The output (AVFOutput) watches it and rebuilds
-        // its engine for the new backend live, so toggling Virtual 3D takes effect without restarting
+        // its engine for the new backend live, so toggling Virtual Surround takes effect without restarting
         // foobar or the output (an output instance is long-lived; it would otherwise never re-read).
         unsigned long long mode_generation();
 
-    } // namespace v3d_config
+    } // namespace vsurround_config
 } // namespace foo_out_avf

@@ -1,10 +1,10 @@
 //
-//  v3d_config_bridge.h
+//  vsurround_config_bridge.h
 //  foo_out_avfoundation
 //
-//  Objective-C face of foo_out_avf::v3d_config, so the Swift UI can read/write the virtual speaker rig
+//  Objective-C face of foo_out_avf::vsurround_config, so the Swift UI can read/write the virtual speaker rig
 //  without touching C++ directly. Exposed to Swift via the bridging header. Class properties keep the
-//  Swift call sites terse (V3DConfig.frontAzimuth = ...). Every write persists immediately AND bumps the
+//  Swift call sites terse (VSurroundConfig.frontAzimuth = ...). Every write persists immediately AND bumps the
 //  layout generation, so a running engine picks the change up live (configStore + in-memory cache).
 //
 
@@ -12,10 +12,10 @@
 
 NS_ASSUME_NONNULL_BEGIN
 
-@interface V3DConfig : NSObject
+@interface VSurroundConfig : NSObject
 
-// Output mode: YES = Virtual3D, NO = SystemSpatial. (Applies on the next playback start.)
-@property(class, nonatomic) BOOL virtual3DEnabled;
+// Output mode: YES = VirtualSurround, NO = SystemSpatial. (Applies on the next playback start.)
+@property(class, nonatomic) BOOL virtualSurroundEnabled;
 
 // Front / rear speaker pairs (DAW-style): distance in meters, spacing = angle between the two
 // speakers, azimuth/elevation of the pair center in degrees.
@@ -60,8 +60,8 @@ NS_ASSUME_NONNULL_BEGIN
 @property(class, nonatomic, readonly) NSArray<NSNumber *> *standard51Values;
 
 // Commit a whole layout + mode in one shot (one persist, one generation bump, clears any preview).
-// `values` is the 18 numbers in the order above; `v3dEnabled` selects the output mode. The "Save".
-+ (void)applyLayoutValues:(NSArray<NSNumber *> *)values mode:(BOOL)v3dEnabled;
+// `values` is the 18 numbers in the order above; `vsurroundEnabled` selects the output mode. The "Save".
++ (void)applyLayoutValues:(NSArray<NSNumber *> *)values mode:(BOOL)vsurroundEnabled;
 
 // Live preview (same 18-value order): install the values as a transient preview the engine renders
 // immediately WITHOUT persisting. clearPreview drops it (so leaving the page unsaved reverts).

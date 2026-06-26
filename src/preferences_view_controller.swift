@@ -9,7 +9,7 @@
 //  Editing is a PREVIEW transaction: every edit updates the working layout, the on-screen preview, AND
 //  the running engine live (you hear the field move) — but nothing is persisted. Leaving the page
 //  without Save drops the preview, so the engine reverts to the saved layout. "Save" commits the whole
-//  layout + the Virtual 3D switch (the mode change applies on the next playback start). "Reset" loads
+//  layout + the Virtual Surround switch (the mode change applies on the next playback start). "Reset" loads
 //  the standard 5.1 layout into the editor.
 //
 //  @objc name is fixed; preferences_page.mm resolves the controller by it (NSClassFromString).
@@ -17,22 +17,25 @@
 
 import AppKit
 
-@objc(V3DPreferencesViewController)
-final class V3DPreferencesViewController: NSViewController {
+@objc(VSurroundPreferencesViewController)
+final class VSurroundPreferencesViewController: NSViewController {
 
     // Half-extent of the stage in meters (pad edge = RANGE m from the listener).
     private let range: CGFloat = 4.0
 
-    // Working (unsaved) layout. Mirrors v3d_config::Layout; committed to V3DConfig only on Save.
-    private var v3dEnabled = false
+    // Working (unsaved) layout. Mirrors vsurround_config::Layout; committed to VSurroundConfig only on Save.
+    private var vsurroundEnabled = false
     private var frontDist = 2.0, frontSpacing = 60.0, frontAz = 0.0, frontEl = 0.0
     private var rearDist = 2.0, rearSpacing = 140.0, rearAz = 180.0, rearEl = 0.0
     private var centerX = 0.0, centerY = 0.0, centerZ = -2.0
     private var lfeX = 0.0, lfeY = -0.4, lfeZ = -1.5
     private var frontGainDb = 0.0, rearGainDb = 0.0, centerGainDb = 0.0, lfeGainDb = 0.0
 
-    private let modeToggle = NSButton(checkboxWithTitle: "Enable Virtual 3D (custom speaker rig)",
+    private let modeToggle = NSButton(checkboxWithTitle: "Enable Virtual Surround (custom speaker rig)",
                                       target: nil, action: nil)
+    // Info icon beside the toggle: click pops a short "how it works" explainer (headphone-only virtual 5.1).
+    private let modeHelp = NSButton()
+    private let modeHelpPopover = NSPopover()
     private let resetButton = NSButton(title: "Reset", target: nil, action: nil)
     private let saveButton = NSButton(title: "Save", target: nil, action: nil)
     private let stage = StageView()
@@ -103,18 +106,28 @@ final class V3DPreferencesViewController: NSViewController {
         "Drag a marker on the stage to move it left/right and front/back, or use the per-group sliders "
         + "(distance, azimuth, elevation, plus spacing for the pairs and gain for all) — the stage and "
         + "the sliders stay in sync. Edits preview live on playback; leaving without Save reverts. Save "
-        + "persists the layout + the Virtual 3D switch (the mode change applies when playback next starts).")
+        + "persists the layout + the Virtual Surround switch (the mode change applies when playback next starts).")
 
     override func loadView() {
         // Flipped so the manual frame layout runs top-down. Plain NSView (no Auto Layout) so the host can
         // size us freely (the preferences NSSplitView must not see a content-driven fittingSize to anchor).
-        view = FlippedView(frame: NSRect(x: 0, y: 0, width: 520, height: 600))
+        view = FlippedView(frame: NSRect(x: 0, y: 0, width: 470, height: 540))
     }
 
     override func viewDidLoad() {
         super.viewDidLoad()
         modeToggle.target = self
         modeToggle.action = #selector(onToggleMode)
+        if #available(macOS 11.0, *) {
+            modeHelp.image = NSImage(systemSymbolName: "info.circle", accessibilityDescription: "About Virtual Surround")
+        }
+        modeHelp.isBordered = false
+        modeHelp.imagePosition = .imageOnly
+        modeHelp.imageScaling = .scaleProportionallyUpOrDown
+        modeHelp.contentTintColor = .secondaryLabelColor
+        modeHelp.target = self
+        modeHelp.action = #selector(toggleModeHelp)
+        buildModeHelpPopover()
         resetButton.bezelStyle = .rounded
         resetButton.target = self
         resetButton.action = #selector(onReset)
@@ -128,9 +141,64 @@ final class V3DPreferencesViewController: NSViewController {
         loadFromConfig()
     }
 
+    // A small click-to-show explainer for the mode (no slow tooltip hover). Headphone-only is the first
+    // beat; the rest is how it actually works.
+    private func buildModeHelpPopover() {
+        // Plain-language, step-by-step explainer (not engineer notes). Headphones get the one mention it
+        // needs in the opening line; the rest walks the signal path the way you'd explain it to a friend.
+        let para = NSMutableParagraphStyle()
+        para.paragraphSpacing = 6
+        let stepPara = NSMutableParagraphStyle()
+        stepPara.paragraphSpacing = 6
+        stepPara.headIndent = 18 // hanging indent so wrapped lines line up under the text, not the number
+        stepPara.tabStops = [NSTextTab(textAlignment: .left, location: 18)]
+
+        let s = NSMutableAttributedString()
+        func add(_ str: String, _ font: NSFont, _ style: NSParagraphStyle) {
+            s.append(NSAttributedString(string: str, attributes: [
+                .font: font, .foregroundColor: NSColor.labelColor, .paragraphStyle: style,
+            ]))
+        }
+        add("How Virtual Surround works\n", .boldSystemFont(ofSize: 12.5), para)
+        add("It rebuilds a 5.1 surround speaker setup inside your headphones:\n", .systemFont(ofSize: 11), para)
+        let steps = [
+            "If the music is already surround (5.1, 7.1…), each channel is mapped straight to its own speaker.",
+            "If it's plain stereo, an STFT upmix expands it to 5.1 — pulling the leading sound apart from "
+                + "the ambience and steering each to its channel.",
+            "Every channel is bound to its own AVAudioSourceNode and placed as a virtual loudspeaker at a "
+                + "point around you.",
+            "Finally Apple's HRTFHQ spatializer mixes them back down to a binaural signal, so each speaker "
+                + "still seems to come from its real direction.",
+        ]
+        for (i, st) in steps.enumerated() {
+            add("\(i + 1).\t\(st)\(i == steps.count - 1 ? "" : "\n")", .systemFont(ofSize: 11), stepPara)
+        }
+
+        let label = NSTextField(wrappingLabelWithString: "")
+        label.attributedStringValue = s
+        label.preferredMaxLayoutWidth = 280
+        let h = label.intrinsicContentSize.height
+        label.frame = NSRect(x: 14, y: 14, width: 280, height: h)
+        let content = NSView(frame: NSRect(x: 0, y: 0, width: 308, height: h + 28))
+        content.addSubview(label)
+        let vc = NSViewController()
+        vc.view = content
+        modeHelpPopover.contentViewController = vc
+        modeHelpPopover.contentSize = content.frame.size
+        modeHelpPopover.behavior = .transient
+    }
+
+    @objc private func toggleModeHelp() {
+        if modeHelpPopover.isShown {
+            modeHelpPopover.performClose(nil)
+        } else {
+            modeHelpPopover.show(relativeTo: modeHelp.bounds, of: modeHelp, preferredEdge: .maxY)
+        }
+    }
+
     override func viewWillDisappear() {
         super.viewWillDisappear()
-        V3DConfig.clearPreview() // drop the live preview → engine reverts to the saved layout
+        VSurroundConfig.clearPreview() // drop the live preview → engine reverts to the saved layout
     }
 
     override func viewDidLayout() { super.viewDidLayout(); relayout() }
@@ -147,6 +215,7 @@ final class V3DPreferencesViewController: NSViewController {
 
         // Fixed regions live directly in `view`; the scrollable parameter list lives in `docView`.
         view.addSubview(modeToggle)
+        view.addSubview(modeHelp)
         stageLabel = makeCaption("Stage (top-down)")
         sceneLabel = makeCaption("Preview")
         view.addSubview(stageLabel)
@@ -203,6 +272,7 @@ final class V3DPreferencesViewController: NSViewController {
         addStepperRow("Crossover Q (steepness)", bassQField, bassQStepper,
                       min: 0.3, max: 5, step: 0.1, decimals: 1,
                       #selector(onBassQStepper), #selector(onBassQField))
+        hint.alignment = .justified // fill each line edge-to-edge so the wrap doesn't leave a ragged right column
         view.addSubview(hint) // fixed (outside the scroll) — always visible
     }
 
@@ -351,7 +421,7 @@ final class V3DPreferencesViewController: NSViewController {
         let W = view.bounds.width
         let H = view.bounds.height
         if W <= 1 || H <= 1 { return }
-        let pad: CGFloat = 16
+        let pad: CGFloat = 22
         let gap: CGFloat = 10
         let innerW = W - 2 * pad
 
@@ -365,9 +435,11 @@ final class V3DPreferencesViewController: NSViewController {
         let blockW = side * 2 + panelGap
         let bx = pad + max(0, (innerW - blockW) / 2) // left edge of the centered block
 
-        // Header (mode toggle).
+        // Header (mode toggle + an info icon right after its label).
         var y: CGFloat = pad
-        modeToggle.frame = NSRect(x: bx, y: y, width: blockW, height: 20)
+        let toggleW = min(modeToggle.intrinsicContentSize.width, blockW - 24)
+        modeToggle.frame = NSRect(x: bx, y: y, width: toggleW, height: 20)
+        modeHelp.frame = NSRect(x: bx + toggleW + 4, y: y + 2, width: 15, height: 15)
         y += 20 + gap
 
         // DSP controls (bass high-pass + FFT), fixed above the panels.
@@ -416,7 +488,7 @@ final class V3DPreferencesViewController: NSViewController {
 
     // Full refresh: markers + sliders + toggle + derived preview. Used on load and reset.
     private func refreshAll() {
-        modeToggle.state = v3dEnabled ? .on : .off
+        modeToggle.state = vsurroundEnabled ? .on : .off
         let (fnx, fny) = pairMarker(az: frontAz, dist: frontDist)
         let (rnx, rny) = pairMarker(az: rearAz, dist: rearDist)
         stage.markers = [
@@ -461,7 +533,7 @@ final class V3DPreferencesViewController: NSViewController {
         stage.dots = dots
         scene.update(positions: positions)
         updateValueLabels()
-        V3DConfig.previewLayoutValues(currentValues()) // live: engine renders this without persisting
+        VSurroundConfig.previewLayoutValues(currentValues()) // live: engine renders this without persisting
     }
 
     private func updateValueLabels() {
@@ -505,7 +577,7 @@ final class V3DPreferencesViewController: NSViewController {
     }
 
     // The six speaker positions [FL, FR, C, LFE, RL, RR] from the working layout — mirrors the C++
-    // v3d_config::compute_speakers so the preview matches what the engine will render.
+    // vsurround_config::compute_speakers so the preview matches what the engine will render.
     private func speakerPositions() -> [(Double, Double, Double)] {
         func sph(_ azDeg: Double, _ elDeg: Double, _ d: Double) -> (Double, Double, Double) {
             let a = azDeg * .pi / 180, e = elDeg * .pi / 180, ce = cos(e)
@@ -518,7 +590,7 @@ final class V3DPreferencesViewController: NSViewController {
         return [fl, fr, (centerX, centerY, centerZ), (lfeX, lfeY, lfeZ), rl, rr]
     }
 
-    // The 18-value layout array V3DConfig expects (geometry 0..13, gains 14..17).
+    // The 18-value layout array VSurroundConfig expects (geometry 0..13, gains 14..17).
     private func currentValues() -> [NSNumber] {
         [
             NSNumber(value: frontDist), NSNumber(value: frontSpacing), NSNumber(value: frontAz), NSNumber(value: frontEl),
@@ -557,32 +629,32 @@ final class V3DPreferencesViewController: NSViewController {
     // MARK: - load / save
 
     private func loadFromConfig() {
-        v3dEnabled = V3DConfig.virtual3DEnabled
-        frontDist = V3DConfig.frontDistance; frontSpacing = V3DConfig.frontSpacing
-        frontAz = V3DConfig.frontAzimuth; frontEl = V3DConfig.frontElevation
-        rearDist = V3DConfig.rearDistance; rearSpacing = V3DConfig.rearSpacing
-        rearAz = normRearAz(V3DConfig.rearAzimuth); rearEl = V3DConfig.rearElevation
-        centerX = V3DConfig.centerX; centerY = V3DConfig.centerY; centerZ = V3DConfig.centerZ
-        lfeX = V3DConfig.lfeX; lfeY = V3DConfig.lfeY; lfeZ = V3DConfig.lfeZ
-        frontGainDb = V3DConfig.frontGainDb; rearGainDb = V3DConfig.rearGainDb
-        centerGainDb = V3DConfig.centerGainDb; lfeGainDb = V3DConfig.lfeGainDb
+        vsurroundEnabled = VSurroundConfig.virtualSurroundEnabled
+        frontDist = VSurroundConfig.frontDistance; frontSpacing = VSurroundConfig.frontSpacing
+        frontAz = VSurroundConfig.frontAzimuth; frontEl = VSurroundConfig.frontElevation
+        rearDist = VSurroundConfig.rearDistance; rearSpacing = VSurroundConfig.rearSpacing
+        rearAz = normRearAz(VSurroundConfig.rearAzimuth); rearEl = VSurroundConfig.rearElevation
+        centerX = VSurroundConfig.centerX; centerY = VSurroundConfig.centerY; centerZ = VSurroundConfig.centerZ
+        lfeX = VSurroundConfig.lfeX; lfeY = VSurroundConfig.lfeY; lfeZ = VSurroundConfig.lfeZ
+        frontGainDb = VSurroundConfig.frontGainDb; rearGainDb = VSurroundConfig.rearGainDb
+        centerGainDb = VSurroundConfig.centerGainDb; lfeGainDb = VSurroundConfig.lfeGainDb
 
         // DSP controls (bass high-pass + FFT window).
-        bassFloorStepper.doubleValue = V3DConfig.bassFloorDb; bassFloorField.doubleValue = V3DConfig.bassFloorDb
-        bassCutoffStepper.doubleValue = V3DConfig.bassCutoffHz; bassCutoffField.doubleValue = V3DConfig.bassCutoffHz
-        bassQStepper.doubleValue = V3DConfig.bassQ; bassQField.doubleValue = V3DConfig.bassQ
-        fftPopup.selectItem(at: fftSizes.firstIndex(of: V3DConfig.fftSize) ?? 1)
+        bassFloorStepper.doubleValue = VSurroundConfig.bassFloorDb; bassFloorField.doubleValue = VSurroundConfig.bassFloorDb
+        bassCutoffStepper.doubleValue = VSurroundConfig.bassCutoffHz; bassCutoffField.doubleValue = VSurroundConfig.bassCutoffHz
+        bassQStepper.doubleValue = VSurroundConfig.bassQ; bassQField.doubleValue = VSurroundConfig.bassQ
+        fftPopup.selectItem(at: fftSizes.firstIndex(of: VSurroundConfig.fftSize) ?? 1)
         updateFftNote()
 
         refreshAll()
     }
 
     @objc private func onSave() {
-        V3DConfig.applyLayoutValues(currentValues(), mode: v3dEnabled) // persist + clear preview + set mode
+        VSurroundConfig.applyLayoutValues(currentValues(), mode: vsurroundEnabled) // persist + clear preview + set mode
     }
 
     @objc private func onReset() {
-        let v = V3DConfig.standard51Values // canonical 5.1 from the C++ default (Save still needed to persist)
+        let v = VSurroundConfig.standard51Values // canonical 5.1 from the C++ default (Save still needed to persist)
         guard v.count >= 18 else { return }
         frontDist = v[0].doubleValue; frontSpacing = v[1].doubleValue; frontAz = v[2].doubleValue; frontEl = v[3].doubleValue
         rearDist = v[4].doubleValue; rearSpacing = v[5].doubleValue; rearAz = normRearAz(v[6].doubleValue); rearEl = v[7].doubleValue
@@ -595,7 +667,7 @@ final class V3DPreferencesViewController: NSViewController {
 
     // MARK: - edits (working state + live preview; Save commits)
 
-    @objc private func onToggleMode() { v3dEnabled = (modeToggle.state == .on) }
+    @objc private func onToggleMode() { vsurroundEnabled = (modeToggle.state == .on) }
 
     // A drag moves the horizontal position (azimuth + distance); the sliders for the dragged group are
     // refreshed to match. Elevation/spacing aren't expressible on the 2D plane, so they're left as-is.
@@ -660,15 +732,15 @@ final class V3DPreferencesViewController: NSViewController {
     @objc private func onLfeElevation() { setLfe(el: lfeElevation_.doubleValue) }
     @objc private func onLfeGain() { lfeGainDb = lfeGain_.doubleValue; refreshDerived() }
 
-    // DSP params — persisted immediately via V3DConfig (each write bumps the DSP generation so a playing
+    // DSP params — persisted immediately via VSurroundConfig (each write bumps the DSP generation so a playing
     // engine rebuilds the upmixer). Stepper and field mirror each other; setting the stepper clamps to range.
-    @objc private func onBassFloorStepper() { bassFloorField.doubleValue = bassFloorStepper.doubleValue; V3DConfig.bassFloorDb = bassFloorStepper.doubleValue }
-    @objc private func onBassFloorField() { bassFloorStepper.doubleValue = bassFloorField.doubleValue; bassFloorField.doubleValue = bassFloorStepper.doubleValue; V3DConfig.bassFloorDb = bassFloorStepper.doubleValue }
-    @objc private func onBassCutoffStepper() { bassCutoffField.doubleValue = bassCutoffStepper.doubleValue; V3DConfig.bassCutoffHz = bassCutoffStepper.doubleValue }
-    @objc private func onBassCutoffField() { bassCutoffStepper.doubleValue = bassCutoffField.doubleValue; bassCutoffField.doubleValue = bassCutoffStepper.doubleValue; V3DConfig.bassCutoffHz = bassCutoffStepper.doubleValue }
-    @objc private func onBassQStepper() { bassQField.doubleValue = bassQStepper.doubleValue; V3DConfig.bassQ = bassQStepper.doubleValue }
-    @objc private func onBassQField() { bassQStepper.doubleValue = bassQField.doubleValue; bassQField.doubleValue = bassQStepper.doubleValue; V3DConfig.bassQ = bassQStepper.doubleValue }
-    @objc private func onFftChanged() { V3DConfig.fftSize = fftSizes[Swift.max(0, fftPopup.indexOfSelectedItem)]; updateFftNote() }
+    @objc private func onBassFloorStepper() { bassFloorField.doubleValue = bassFloorStepper.doubleValue; VSurroundConfig.bassFloorDb = bassFloorStepper.doubleValue }
+    @objc private func onBassFloorField() { bassFloorStepper.doubleValue = bassFloorField.doubleValue; bassFloorField.doubleValue = bassFloorStepper.doubleValue; VSurroundConfig.bassFloorDb = bassFloorStepper.doubleValue }
+    @objc private func onBassCutoffStepper() { bassCutoffField.doubleValue = bassCutoffStepper.doubleValue; VSurroundConfig.bassCutoffHz = bassCutoffStepper.doubleValue }
+    @objc private func onBassCutoffField() { bassCutoffStepper.doubleValue = bassCutoffField.doubleValue; bassCutoffField.doubleValue = bassCutoffStepper.doubleValue; VSurroundConfig.bassCutoffHz = bassCutoffStepper.doubleValue }
+    @objc private func onBassQStepper() { bassQField.doubleValue = bassQStepper.doubleValue; VSurroundConfig.bassQ = bassQStepper.doubleValue }
+    @objc private func onBassQField() { bassQStepper.doubleValue = bassQField.doubleValue; bassQField.doubleValue = bassQStepper.doubleValue; VSurroundConfig.bassQ = bassQStepper.doubleValue }
+    @objc private func onFftChanged() { VSurroundConfig.fftSize = fftSizes[Swift.max(0, fftPopup.indexOfSelectedItem)]; updateFftNote() }
 
     // Replace one spherical component of a mono speaker (keeping the other two) and write back cartesian.
     private func setCenter(dist: Double? = nil, az: Double? = nil, el: Double? = nil) {

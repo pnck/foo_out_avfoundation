@@ -5,12 +5,12 @@
 //  C++ facade over the Objective-C output backends. It holds one id<AVFOutputBackend> and forwards
 //  every call to it; which concrete backend it is depends on OutputMode:
 //    - engine_sys_spatialized.mm (AVFSysSpatializedBackend)         — system Spatial Audio (default)
-//    - engine_virtual_3d.mm  (AVFVirtual3DBackend) — in-process HRTFHQ positional path (V3D)
+//    - engine_virtual_surround.mm  (AVFVirtualSurroundBackend) — in-process HRTFHQ positional path (VSurround)
 //  This is the single place backend selection happens. See docs/memo.md "File layout".
 //
 
 #import "engine.h"
-#import "engine_virtual_3d.h"
+#import "engine_virtual_surround.h"
 
 namespace foo_out_avf
 {
@@ -19,8 +19,8 @@ namespace foo_out_avf
     // the facade never needs to know which one it holds beyond this point.
     static id<AVFOutputBackend> avf_make_backend(OutputMode mode) {
         switch (mode) {
-        case OutputMode::Virtual3D:
-            return [[AVFVirtual3DBackend alloc] init];
+        case OutputMode::VirtualSurround:
+            return [[AVFVirtualSurroundBackend alloc] init];
         case OutputMode::SystemSpatial:
         default:
             return [[AVFSysSpatializedBackend alloc] init];
