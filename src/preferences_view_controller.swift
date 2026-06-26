@@ -38,36 +38,64 @@ final class V3DPreferencesViewController: NSViewController {
     private let stage = StageView()
     private let scene = SceneRigView()
 
-    private let frontSpacing_ = NSSlider()
+    // Manual-layout scaffolding (no Auto Layout): the scrollable form lives in `docView`, every form
+    // entry is (view, fixed-height) in `formItems`, positioned by frame in relayout().
+    private let scrollView = NSScrollView()
+    private let docView = FlippedView()
+    private var stageLabel = NSTextField()
+    private var sceneLabel = NSTextField()
+    private var formItems: [(NSView, CGFloat)] = []
+
+    // Every group is edited in the SAME spherical terms (distance / azimuth / elevation), so the mono
+    // centre + LFE behave exactly like the pairs; the pairs add spacing, everything has a gain.
+    private let frontDistance_ = NSSlider()
+    private let frontAzimuth_ = NSSlider()
     private let frontElevation_ = NSSlider()
+    private let frontSpacing_ = NSSlider()
     private let frontGain_ = NSSlider()
-    private let rearSpacing_ = NSSlider()
+    private let rearDistance_ = NSSlider()
+    private let rearAzimuth_ = NSSlider()
     private let rearElevation_ = NSSlider()
+    private let rearSpacing_ = NSSlider()
     private let rearGain_ = NSSlider()
-    private let centerHeight_ = NSSlider()
+    private let centerDistance_ = NSSlider()
+    private let centerAzimuth_ = NSSlider()
+    private let centerElevation_ = NSSlider()
     private let centerGain_ = NSSlider()
-    private let lfeHeight_ = NSSlider()
+    private let lfeDistance_ = NSSlider()
+    private let lfeAzimuth_ = NSSlider()
+    private let lfeElevation_ = NSSlider()
     private let lfeGain_ = NSSlider()
 
-    private let frontSpacingValue = NSTextField(labelWithString: "")
+    private let frontDistanceValue = NSTextField(labelWithString: "")
+    private let frontAzimuthValue = NSTextField(labelWithString: "")
     private let frontElevationValue = NSTextField(labelWithString: "")
+    private let frontSpacingValue = NSTextField(labelWithString: "")
     private let frontGainValue = NSTextField(labelWithString: "")
-    private let rearSpacingValue = NSTextField(labelWithString: "")
+    private let rearDistanceValue = NSTextField(labelWithString: "")
+    private let rearAzimuthValue = NSTextField(labelWithString: "")
     private let rearElevationValue = NSTextField(labelWithString: "")
+    private let rearSpacingValue = NSTextField(labelWithString: "")
     private let rearGainValue = NSTextField(labelWithString: "")
-    private let centerHeightValue = NSTextField(labelWithString: "")
+    private let centerDistanceValue = NSTextField(labelWithString: "")
+    private let centerAzimuthValue = NSTextField(labelWithString: "")
+    private let centerElevationValue = NSTextField(labelWithString: "")
     private let centerGainValue = NSTextField(labelWithString: "")
-    private let lfeHeightValue = NSTextField(labelWithString: "")
+    private let lfeDistanceValue = NSTextField(labelWithString: "")
+    private let lfeAzimuthValue = NSTextField(labelWithString: "")
+    private let lfeElevationValue = NSTextField(labelWithString: "")
     private let lfeGainValue = NSTextField(labelWithString: "")
 
     private let hint = NSTextField(wrappingLabelWithString:
-        "Drag the front/rear pair centres and the mono centre/LFE around the listener (top-down). "
-        + "Spacing/elevation/gain are per-group sliders; gain offsets the distance attenuation on far "
-        + "speakers. Edits preview live on playback; leaving without Save reverts. Save persists the "
-        + "layout + the Virtual 3D switch (the mode change applies when playback next starts).")
+        "Drag a marker on the stage to move it left/right and front/back, or use the per-group sliders "
+        + "(distance, azimuth, elevation, plus spacing for the pairs and gain for all) — the stage and "
+        + "the sliders stay in sync. Edits preview live on playback; leaving without Save reverts. Save "
+        + "persists the layout + the Virtual 3D switch (the mode change applies when playback next starts).")
 
     override func loadView() {
-        view = NSView(frame: NSRect(x: 0, y: 0, width: 660, height: 600))
+        // Flipped so the manual frame layout runs top-down. Plain NSView (no Auto Layout) so the host can
+        // size us freely (the preferences NSSplitView must not see a content-driven fittingSize to anchor).
+        view = FlippedView(frame: NSRect(x: 0, y: 0, width: 520, height: 600))
     }
 
     override func viewDidLoad() {
@@ -92,104 +120,171 @@ final class V3DPreferencesViewController: NSViewController {
         V3DConfig.clearPreview() // drop the live preview → engine reverts to the saved layout
     }
 
+    override func viewDidLayout() { super.viewDidLayout(); relayout() }
+
     // MARK: - layout
 
     private func buildLayout() {
-        stage.translatesAutoresizingMaskIntoConstraints = false
-        stage.heightAnchor.constraint(equalToConstant: 240).isActive = true
-        stage.widthAnchor.constraint(greaterThanOrEqualToConstant: 240).isActive = true
-        scene.translatesAutoresizingMaskIntoConstraints = false
-        scene.heightAnchor.constraint(equalToConstant: 240).isActive = true
-        scene.widthAnchor.constraint(greaterThanOrEqualToConstant: 240).isActive = true
+        // MANUAL frame layout — NO Auto Layout, NO NSStackView. Auto Layout on our view gives `view` a
+        // content-driven fittingSize, and foobar's NSSplitView ANCHORS the list/content divider to it (so
+        // the divider rebounds and the window won't even resize). The debug text-area page proved a plain
+        // frame/autoresizing view has NO such anchor and tracks the pane perfectly. So here every control
+        // is positioned by frame in relayout() (run from viewDidLayout) and resizes independently with the
+        // pane — exactly like that text area. `view` is flipped (see loadView) so layout runs top-down.
 
-        let topRow = NSStackView(views: [labeled("Stage (top-down)", stage),
-                                         labeled("Preview", scene)])
-        topRow.orientation = .horizontal
-        topRow.distribution = .fillEqually
-        topRow.spacing = 12
+        // Fixed regions live directly in `view`; the scrollable parameter list lives in `docView`.
+        view.addSubview(modeToggle)
+        stageLabel = makeCaption("Stage (top-down)")
+        sceneLabel = makeCaption("Preview")
+        view.addSubview(stageLabel)
+        view.addSubview(sceneLabel)
+        view.addSubview(stage)
+        view.addSubview(scene)
+        view.addSubview(resetButton)
+        view.addSubview(saveButton)
 
-        let controls = NSStackView(views: [
-            section("Front pair"),
-            sliderRow("Spacing", frontSpacing_, frontSpacingValue, min: 0, max: 180, action: #selector(onFrontSpacing)),
-            sliderRow("Elevation", frontElevation_, frontElevationValue, min: -60, max: 60, action: #selector(onFrontElevation)),
-            sliderRow("Gain (dB)", frontGain_, frontGainValue, min: -36, max: 24, action: #selector(onFrontGain)),
-            section("Rear pair"),
-            sliderRow("Spacing", rearSpacing_, rearSpacingValue, min: 0, max: 180, action: #selector(onRearSpacing)),
-            sliderRow("Elevation", rearElevation_, rearElevationValue, min: -60, max: 60, action: #selector(onRearElevation)),
-            sliderRow("Gain (dB)", rearGain_, rearGainValue, min: -36, max: 24, action: #selector(onRearGain)),
-            section("Mono speakers"),
-            sliderRow("Centre height", centerHeight_, centerHeightValue, min: -2, max: 2, action: #selector(onCenterHeight)),
-            sliderRow("Centre gain (dB)", centerGain_, centerGainValue, min: -36, max: 24, action: #selector(onCenterGain)),
-            sliderRow("LFE height", lfeHeight_, lfeHeightValue, min: -2, max: 2, action: #selector(onLfeHeight)),
-            sliderRow("LFE gain (dB)", lfeGain_, lfeGainValue, min: -36, max: 24, action: #selector(onLfeGain)),
-        ])
-        controls.orientation = .vertical
-        controls.alignment = .leading
-        controls.spacing = 6
+        scrollView.hasVerticalScroller = true
+        scrollView.hasHorizontalScroller = false
+        scrollView.drawsBackground = false
+        scrollView.autohidesScrollers = true
+        scrollView.documentView = docView
+        view.addSubview(scrollView)
 
-        let buttons = NSStackView(views: [resetButton, saveButton])
-        buttons.orientation = .horizontal
-        buttons.spacing = 10
-
-        let header = NSStackView(views: [modeToggle])
-        header.orientation = .horizontal
-
-        let root = NSStackView(views: [header, topRow, controls, buttons, hint])
-        root.orientation = .vertical
-        root.alignment = .leading
-        root.spacing = 12
-        root.translatesAutoresizingMaskIntoConstraints = false
-        view.addSubview(root)
-        NSLayoutConstraint.activate([
-            root.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 16),
-            root.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -16),
-            root.topAnchor.constraint(equalTo: view.topAnchor, constant: 16),
-            root.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -16),
-        ])
+        // Build the scrollable form. Per group: direction (azimuth, elevation), distance, spacing (pairs
+        // only), then gain last.
+        addSection("Front pair")
+        addRow("Azimuth", frontAzimuth_, frontAzimuthValue, -180, 180, #selector(onFrontAzimuth))
+        addRow("Elevation", frontElevation_, frontElevationValue, -90, 90, #selector(onFrontElevation))
+        addRow("Distance", frontDistance_, frontDistanceValue, 0.3, 4.0, #selector(onFrontDistance))
+        addRow("Spacing", frontSpacing_, frontSpacingValue, 0, 180, #selector(onFrontSpacing))
+        addRow("Gain (dB)", frontGain_, frontGainValue, -36, 24, #selector(onFrontGain))
+        addSection("Rear pair")
+        addRow("Azimuth", rearAzimuth_, rearAzimuthValue, 0, 360, #selector(onRearAzimuth))
+        addRow("Elevation", rearElevation_, rearElevationValue, -90, 90, #selector(onRearElevation))
+        addRow("Distance", rearDistance_, rearDistanceValue, 0.3, 4.0, #selector(onRearDistance))
+        addRow("Spacing", rearSpacing_, rearSpacingValue, 0, 180, #selector(onRearSpacing))
+        addRow("Gain (dB)", rearGain_, rearGainValue, -36, 24, #selector(onRearGain))
+        addSection("Centre")
+        addRow("Azimuth", centerAzimuth_, centerAzimuthValue, -180, 180, #selector(onCenterAzimuth))
+        addRow("Elevation", centerElevation_, centerElevationValue, -90, 90, #selector(onCenterElevation))
+        addRow("Distance", centerDistance_, centerDistanceValue, 0.3, 4.0, #selector(onCenterDistance))
+        addRow("Gain (dB)", centerGain_, centerGainValue, -36, 24, #selector(onCenterGain))
+        addSection("LFE")
+        addRow("Azimuth", lfeAzimuth_, lfeAzimuthValue, -180, 180, #selector(onLfeAzimuth))
+        addRow("Elevation", lfeElevation_, lfeElevationValue, -90, 90, #selector(onLfeElevation))
+        addRow("Distance", lfeDistance_, lfeDistanceValue, 0.3, 4.0, #selector(onLfeDistance))
+        addRow("Gain (dB)", lfeGain_, lfeGainValue, -36, 24, #selector(onLfeGain))
+        view.addSubview(hint) // fixed (outside the scroll) — always visible
     }
 
-    private func labeled(_ title: String, _ content: NSView) -> NSView {
-        let label = NSTextField(labelWithString: title)
-        label.font = .systemFont(ofSize: 11)
-        label.textColor = .secondaryLabelColor
-        let box = NSStackView(views: [label, content])
-        box.orientation = .vertical
-        box.alignment = .leading
-        box.spacing = 4
-        return box
+    private func makeCaption(_ s: String) -> NSTextField {
+        let l = NSTextField(labelWithString: s)
+        l.font = .systemFont(ofSize: 11)
+        l.textColor = .secondaryLabelColor
+        return l
     }
 
-    private func section(_ title: String) -> NSView {
-        let label = NSTextField(labelWithString: title)
-        label.font = .boldSystemFont(ofSize: 11)
-        label.textColor = .secondaryLabelColor
-        return label
+    private func addSection(_ title: String) {
+        let l = NSTextField(labelWithString: title)
+        l.font = .boldSystemFont(ofSize: 11)
+        l.textColor = .secondaryLabelColor
+        docView.addSubview(l)
+        formItems.append((l, 20))
     }
 
-    private func sliderRow(_ title: String, _ slider: NSSlider, _ valueLabel: NSTextField,
-                           min: Double, max: Double, action: Selector) -> NSView {
-        slider.minValue = min
-        slider.maxValue = max
+    private func addRow(_ title: String, _ slider: NSSlider, _ value: NSTextField,
+                        _ mn: Double, _ mx: Double, _ action: Selector) {
+        slider.minValue = mn
+        slider.maxValue = mx
         slider.isContinuous = true
         slider.target = self
         slider.action = action
-        slider.translatesAutoresizingMaskIntoConstraints = false
-        slider.widthAnchor.constraint(equalToConstant: 220).isActive = true
+        // A plain (non-Auto-Layout) row: title pinned left, value pinned right, slider stretches between
+        // them via autoresizing — so each row resizes independently when relayout() sets its width.
+        let rowH: CGFloat = 24
+        let row = NSView(frame: NSRect(x: 0, y: 0, width: 360, height: rowH))
+        row.autoresizesSubviews = true
 
-        let titleLabel = NSTextField(labelWithString: title)
-        titleLabel.font = .systemFont(ofSize: 11)
-        titleLabel.translatesAutoresizingMaskIntoConstraints = false
-        titleLabel.widthAnchor.constraint(equalToConstant: 110).isActive = true
+        let t = NSTextField(labelWithString: title)
+        t.font = .systemFont(ofSize: 11)
+        t.frame = NSRect(x: 0, y: 4, width: 104, height: 16)
+        t.autoresizingMask = [.maxXMargin] // pinned left
 
-        valueLabel.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
-        valueLabel.textColor = .secondaryLabelColor
-        valueLabel.translatesAutoresizingMaskIntoConstraints = false
-        valueLabel.widthAnchor.constraint(equalToConstant: 56).isActive = true
+        value.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
+        value.textColor = .secondaryLabelColor
+        value.alignment = .right
+        value.frame = NSRect(x: 360 - 60, y: 4, width: 58, height: 16)
+        value.autoresizingMask = [.minXMargin] // pinned right
 
-        let row = NSStackView(views: [titleLabel, slider, valueLabel])
-        row.orientation = .horizontal
-        row.spacing = 8
-        return row
+        slider.frame = NSRect(x: 110, y: 2, width: 360 - 110 - 64, height: 20)
+        slider.autoresizingMask = [.width] // stretches between the labels
+
+        row.addSubview(t)
+        row.addSubview(slider)
+        row.addSubview(value)
+        docView.addSubview(row)
+        formItems.append((row, rowH))
+    }
+
+    // The single layout pass: position every control by frame from the current view bounds. No Auto
+    // Layout, no fittingSize → foobar's NSSplitView has nothing to anchor to, so we track the pane.
+    private func relayout() {
+        guard isViewLoaded else { return }
+        let W = view.bounds.width
+        let H = view.bounds.height
+        if W <= 1 || H <= 1 { return }
+        let pad: CGFloat = 16
+        let gap: CGFloat = 10
+        let innerW = W - 2 * pad
+
+        // The content column is a CENTRED block whose width is the two panels' span. The gap between the
+        // panels widens a little with the window; each panel fills half the remaining width, clamped to
+        // [320, 700] (shrinking below 320 only when the pane is too narrow to fit two). So the block grows
+        // with the window up to ~1470 then stops, and the scroll list / header / buttons align to it.
+        let panelGap = max(16, min(innerW * 0.06, 72))
+        let fitSide = (innerW - panelGap) / 2
+        let side = fitSide >= 320 ? min(fitSide, 700) : max(140, fitSide)
+        let blockW = side * 2 + panelGap
+        let bx = pad + max(0, (innerW - blockW) / 2) // left edge of the centred block
+
+        // Header (mode toggle).
+        var y: CGFloat = pad
+        modeToggle.frame = NSRect(x: bx, y: y, width: blockW, height: 20)
+        y += 20 + gap
+
+        // Two 1:1 render panels at the top of the block.
+        stageLabel.frame = NSRect(x: bx, y: y, width: side, height: 14)
+        sceneLabel.frame = NSRect(x: bx + side + panelGap, y: y, width: side, height: 14)
+        let py = y + 16
+        stage.frame = NSRect(x: bx, y: py, width: side, height: side)
+        scene.frame = NSRect(x: bx + side + panelGap, y: py, width: side, height: side)
+        let topH = py + side + gap
+
+        // Buttons at the block's bottom-right (aligned to the panels' right side).
+        let bw: CGFloat = 84, bh: CGFloat = 26
+        let buttonsY = H - pad - bh
+        saveButton.frame = NSRect(x: bx + blockW - bw, y: buttonsY, width: bw, height: bh)
+        resetButton.frame = NSRect(x: bx + blockW - 2 * bw - 8, y: buttonsY, width: bw, height: bh)
+
+        // Hint text is FIXED (outside the scroll), just above the buttons, so it stays visible.
+        hint.preferredMaxLayoutWidth = blockW
+        let hintH = hint.intrinsicContentSize.height
+        let hintY = buttonsY - gap - hintH
+        hint.frame = NSRect(x: bx, y: hintY, width: blockW, height: hintH)
+
+        // Scrollable parameter list fills between the panels and the hint, capped to the block width.
+        let scrollH = max(0, hintY - gap - topH)
+        scrollView.frame = NSRect(x: bx, y: topH, width: blockW, height: scrollH)
+
+        // Lay the form out inside the (flipped) document, top to bottom.
+        let docW = scrollView.contentView.bounds.width > 1 ? scrollView.contentView.bounds.width : blockW
+        var dy: CGFloat = 0
+        for (v, h) in formItems {
+            v.frame = NSRect(x: 0, y: dy, width: docW, height: h)
+            dy += h + 4
+        }
+        dy += 8
+        docView.frame = NSRect(x: 0, y: 0, width: docW, height: max(dy, scrollH))
     }
 
     // MARK: - working layout -> UI
@@ -205,15 +300,25 @@ final class V3DPreferencesViewController: NSViewController {
             StageMarker(id: "center", nx: monoNx(centerX), ny: monoNy(centerZ), color: .systemGreen, label: "C"),
             StageMarker(id: "lfe", nx: monoNx(lfeX), ny: monoNy(lfeZ), color: .systemPurple, label: "LFE"),
         ]
-        frontSpacing_.doubleValue = frontSpacing
+        frontDistance_.doubleValue = frontDist
+        frontAzimuth_.doubleValue = frontAz
         frontElevation_.doubleValue = frontEl
+        frontSpacing_.doubleValue = frontSpacing
         frontGain_.doubleValue = frontGainDb
-        rearSpacing_.doubleValue = rearSpacing
+        rearDistance_.doubleValue = rearDist
+        rearAzimuth_.doubleValue = rearAz
         rearElevation_.doubleValue = rearEl
+        rearSpacing_.doubleValue = rearSpacing
         rearGain_.doubleValue = rearGainDb
-        centerHeight_.doubleValue = centerY
+        let cs = monoSph(centerX, centerY, centerZ)
+        centerDistance_.doubleValue = cs.dist
+        centerAzimuth_.doubleValue = cs.az
+        centerElevation_.doubleValue = cs.el
         centerGain_.doubleValue = centerGainDb
-        lfeHeight_.doubleValue = lfeY
+        let ls = monoSph(lfeX, lfeY, lfeZ)
+        lfeDistance_.doubleValue = ls.dist
+        lfeAzimuth_.doubleValue = ls.az
+        lfeElevation_.doubleValue = ls.el
         lfeGain_.doubleValue = lfeGainDb
         refreshDerived()
     }
@@ -235,16 +340,43 @@ final class V3DPreferencesViewController: NSViewController {
     }
 
     private func updateValueLabels() {
-        frontSpacingValue.stringValue = String(format: "%.0f°", frontSpacing)
+        frontDistanceValue.stringValue = String(format: "%.1f m", frontDist)
+        frontAzimuthValue.stringValue = String(format: "%.0f°", frontAz)
         frontElevationValue.stringValue = String(format: "%.0f°", frontEl)
+        frontSpacingValue.stringValue = String(format: "%.0f°", frontSpacing)
         frontGainValue.stringValue = String(format: "%+.0f dB", frontGainDb)
-        rearSpacingValue.stringValue = String(format: "%.0f°", rearSpacing)
+        rearDistanceValue.stringValue = String(format: "%.1f m", rearDist)
+        rearAzimuthValue.stringValue = String(format: "%.0f°", rearAz)
         rearElevationValue.stringValue = String(format: "%.0f°", rearEl)
+        rearSpacingValue.stringValue = String(format: "%.0f°", rearSpacing)
         rearGainValue.stringValue = String(format: "%+.0f dB", rearGainDb)
-        centerHeightValue.stringValue = String(format: "%.1f m", centerY)
+        let cs = monoSph(centerX, centerY, centerZ)
+        centerDistanceValue.stringValue = String(format: "%.1f m", cs.dist)
+        centerAzimuthValue.stringValue = String(format: "%.0f°", cs.az)
+        centerElevationValue.stringValue = String(format: "%.0f°", cs.el)
         centerGainValue.stringValue = String(format: "%+.0f dB", centerGainDb)
-        lfeHeightValue.stringValue = String(format: "%.1f m", lfeY)
+        let ls = monoSph(lfeX, lfeY, lfeZ)
+        lfeDistanceValue.stringValue = String(format: "%.1f m", ls.dist)
+        lfeAzimuthValue.stringValue = String(format: "%.0f°", ls.az)
+        lfeElevationValue.stringValue = String(format: "%.0f°", ls.el)
         lfeGainValue.stringValue = String(format: "%+.0f dB", lfeGainDb)
+    }
+
+    // MARK: - mono spherical <-> cartesian
+    // The mono speakers are stored as cartesian (x,y,z) in the layout, but edited in the same spherical
+    // terms as the pairs. These convert between the two, matching speakerPositions()'s sph() convention
+    // (azimuth 0 = front/−z, + = right/+x; elevation 0 = ear level, + = up).
+    private func monoSph(_ x: Double, _ y: Double, _ z: Double) -> (dist: Double, az: Double, el: Double) {
+        let d = (x * x + y * y + z * z).squareRoot()
+        if d < 1e-6 { return (0, 0, 0) }
+        let el = asin(Swift.max(-1, Swift.min(1, y / d))) * 180 / .pi
+        let az = atan2(x, -z) * 180 / .pi
+        return (d, az, el)
+    }
+
+    private func monoXYZ(dist: Double, az: Double, el: Double) -> (Double, Double, Double) {
+        let a = az * .pi / 180, e = el * .pi / 180, ce = cos(e)
+        return (dist * ce * sin(a), dist * sin(e), -dist * ce * cos(a))
     }
 
     // The six speaker positions [FL, FR, C, LFE, RL, RR] from the working layout — mirrors the C++
@@ -286,6 +418,14 @@ final class V3DPreferencesViewController: NSViewController {
         return (az, dist)
     }
 
+    // The rear pair lives near ±180° (dead behind), exactly where atan2's −180/+180 seam is — so a small
+    // drag there would flip the azimuth end to end. Express the rear in [0, 360) instead, which puts 180°
+    // mid-range and the seam at the (rarely used for a rear speaker) front, so adjustment stays smooth.
+    private func normRearAz(_ az: Double) -> Double {
+        let a = az.truncatingRemainder(dividingBy: 360)
+        return a < 0 ? a + 360 : a
+    }
+
     private func monoNx(_ x: Double) -> CGFloat { CGFloat(x) / range }
     private func monoNy(_ z: Double) -> CGFloat { -CGFloat(z) / range } // front (-z) -> +y
 
@@ -296,7 +436,7 @@ final class V3DPreferencesViewController: NSViewController {
         frontDist = V3DConfig.frontDistance; frontSpacing = V3DConfig.frontSpacing
         frontAz = V3DConfig.frontAzimuth; frontEl = V3DConfig.frontElevation
         rearDist = V3DConfig.rearDistance; rearSpacing = V3DConfig.rearSpacing
-        rearAz = V3DConfig.rearAzimuth; rearEl = V3DConfig.rearElevation
+        rearAz = normRearAz(V3DConfig.rearAzimuth); rearEl = V3DConfig.rearElevation
         centerX = V3DConfig.centerX; centerY = V3DConfig.centerY; centerZ = V3DConfig.centerZ
         lfeX = V3DConfig.lfeX; lfeY = V3DConfig.lfeY; lfeZ = V3DConfig.lfeZ
         frontGainDb = V3DConfig.frontGainDb; rearGainDb = V3DConfig.rearGainDb
@@ -312,7 +452,7 @@ final class V3DPreferencesViewController: NSViewController {
         let v = V3DConfig.standard51Values // canonical 5.1 from the C++ default (Save still needed to persist)
         guard v.count >= 18 else { return }
         frontDist = v[0].doubleValue; frontSpacing = v[1].doubleValue; frontAz = v[2].doubleValue; frontEl = v[3].doubleValue
-        rearDist = v[4].doubleValue; rearSpacing = v[5].doubleValue; rearAz = v[6].doubleValue; rearEl = v[7].doubleValue
+        rearDist = v[4].doubleValue; rearSpacing = v[5].doubleValue; rearAz = normRearAz(v[6].doubleValue); rearEl = v[7].doubleValue
         centerX = v[8].doubleValue; centerY = v[9].doubleValue; centerZ = v[10].doubleValue
         lfeX = v[11].doubleValue; lfeY = v[12].doubleValue; lfeZ = v[13].doubleValue
         frontGainDb = v[14].doubleValue; rearGainDb = v[15].doubleValue
@@ -324,30 +464,85 @@ final class V3DPreferencesViewController: NSViewController {
 
     @objc private func onToggleMode() { v3dEnabled = (modeToggle.state == .on) }
 
+    // A drag moves the horizontal position (azimuth + distance); the sliders for the dragged group are
+    // refreshed to match. Elevation/spacing aren't expressible on the 2D plane, so they're left as-is.
     private func onStageChange(_ id: String, _ nx: CGFloat, _ ny: CGFloat) {
         switch id {
         case "front":
             let (az, d) = azDist(nx, ny); frontAz = az; frontDist = d
+            frontDistance_.doubleValue = frontDist
+            frontAzimuth_.doubleValue = frontAz
         case "rear":
-            let (az, d) = azDist(nx, ny); rearAz = az; rearDist = d
+            let (az, d) = azDist(nx, ny); rearAz = normRearAz(az); rearDist = d
+            rearDistance_.doubleValue = rearDist
+            rearAzimuth_.doubleValue = rearAz
         case "center":
             centerX = Double(nx * range); centerZ = -Double(ny * range)
+            let s = monoSph(centerX, centerY, centerZ)
+            centerDistance_.doubleValue = s.dist; centerAzimuth_.doubleValue = s.az; centerElevation_.doubleValue = s.el
         case "lfe":
             lfeX = Double(nx * range); lfeZ = -Double(ny * range)
+            let s = monoSph(lfeX, lfeY, lfeZ)
+            lfeDistance_.doubleValue = s.dist; lfeAzimuth_.doubleValue = s.az; lfeElevation_.doubleValue = s.el
         default:
             break
         }
         refreshDerived()
     }
 
-    @objc private func onFrontSpacing() { frontSpacing = frontSpacing_.doubleValue; refreshDerived() }
+    // Move a marker to match its working position (slider -> stage), without firing onChange. Only the
+    // distance/azimuth controls move a marker; elevation/spacing don't change the top-down position.
+    private func syncPairMarkers() {
+        let (fnx, fny) = pairMarker(az: frontAz, dist: frontDist)
+        let (rnx, rny) = pairMarker(az: rearAz, dist: rearDist)
+        stage.setMarker(id: "front", nx: fnx, ny: fny)
+        stage.setMarker(id: "rear", nx: rnx, ny: rny)
+    }
+
+    private func syncMonoMarkers() {
+        stage.setMarker(id: "center", nx: monoNx(centerX), ny: monoNy(centerZ))
+        stage.setMarker(id: "lfe", nx: monoNx(lfeX), ny: monoNy(lfeZ))
+    }
+
+    // Front pair
+    @objc private func onFrontDistance() { frontDist = frontDistance_.doubleValue; syncPairMarkers(); refreshDerived() }
+    @objc private func onFrontAzimuth() { frontAz = frontAzimuth_.doubleValue; syncPairMarkers(); refreshDerived() }
     @objc private func onFrontElevation() { frontEl = frontElevation_.doubleValue; refreshDerived() }
+    @objc private func onFrontSpacing() { frontSpacing = frontSpacing_.doubleValue; refreshDerived() }
     @objc private func onFrontGain() { frontGainDb = frontGain_.doubleValue; refreshDerived() }
-    @objc private func onRearSpacing() { rearSpacing = rearSpacing_.doubleValue; refreshDerived() }
+    // Rear pair
+    @objc private func onRearDistance() { rearDist = rearDistance_.doubleValue; syncPairMarkers(); refreshDerived() }
+    @objc private func onRearAzimuth() { rearAz = rearAzimuth_.doubleValue; syncPairMarkers(); refreshDerived() }
     @objc private func onRearElevation() { rearEl = rearElevation_.doubleValue; refreshDerived() }
+    @objc private func onRearSpacing() { rearSpacing = rearSpacing_.doubleValue; refreshDerived() }
     @objc private func onRearGain() { rearGainDb = rearGain_.doubleValue; refreshDerived() }
-    @objc private func onCenterHeight() { centerY = centerHeight_.doubleValue; refreshDerived() }
+    // Centre (mono; stored cartesian, edited spherical)
+    @objc private func onCenterDistance() { setCenter(dist: centerDistance_.doubleValue) }
+    @objc private func onCenterAzimuth() { setCenter(az: centerAzimuth_.doubleValue) }
+    @objc private func onCenterElevation() { setCenter(el: centerElevation_.doubleValue) }
     @objc private func onCenterGain() { centerGainDb = centerGain_.doubleValue; refreshDerived() }
-    @objc private func onLfeHeight() { lfeY = lfeHeight_.doubleValue; refreshDerived() }
+    // LFE (mono; stored cartesian, edited spherical)
+    @objc private func onLfeDistance() { setLfe(dist: lfeDistance_.doubleValue) }
+    @objc private func onLfeAzimuth() { setLfe(az: lfeAzimuth_.doubleValue) }
+    @objc private func onLfeElevation() { setLfe(el: lfeElevation_.doubleValue) }
     @objc private func onLfeGain() { lfeGainDb = lfeGain_.doubleValue; refreshDerived() }
+
+    // Replace one spherical component of a mono speaker (keeping the other two) and write back cartesian.
+    private func setCenter(dist: Double? = nil, az: Double? = nil, el: Double? = nil) {
+        let s = monoSph(centerX, centerY, centerZ)
+        (centerX, centerY, centerZ) = monoXYZ(dist: dist ?? s.dist, az: az ?? s.az, el: el ?? s.el)
+        syncMonoMarkers(); refreshDerived()
+    }
+
+    private func setLfe(dist: Double? = nil, az: Double? = nil, el: Double? = nil) {
+        let s = monoSph(lfeX, lfeY, lfeZ)
+        (lfeX, lfeY, lfeZ) = monoXYZ(dist: dist ?? s.dist, az: az ?? s.az, el: el ?? s.el)
+        syncMonoMarkers(); refreshDerived()
+    }
+}
+
+// Top-anchored document view for the scroll view: a flipped coordinate system makes the content lay
+// out from the top down (AppKit's default origin is bottom-left, which would bottom-anchor the page).
+private final class FlippedView: NSView {
+    override var isFlipped: Bool { true }
 }

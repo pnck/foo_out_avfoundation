@@ -29,7 +29,11 @@ final class StageView: NSView {
     var onChange: ((String, CGFloat, CGFloat) -> Void)?
 
     private var draggingIndex: Int?
-    private let grabRadius: CGFloat = 20
+
+    // Point/label sizes scale with the pad (reference 240 pt) so markers stay legible and don't crowd
+    // together when the pad is small; clamped so they never vanish or get huge.
+    private var unit: CGFloat { max(0.7, min(min(bounds.width, bounds.height) / 240, 2.2)) }
+    private var grabRadius: CGFloat { 20 * unit }
 
     override var isFlipped: Bool { false }
     override var acceptsFirstResponder: Bool { true }
@@ -60,14 +64,14 @@ final class StageView: NSView {
 
         // listener at the centre
         NSColor.secondaryLabelColor.setFill()
-        let lr: CGFloat = 5
+        let lr: CGFloat = 5 * unit
         NSBezierPath(ovalIn: CGRect(x: cx - lr, y: cy - lr, width: lr * 2, height: lr * 2)).fill()
 
         // derived speaker dots (feedback)
         for (nx, ny, color) in dots {
             let p = point(nx, ny)
             color.withAlphaComponent(0.55).setFill()
-            let r: CGFloat = 5
+            let r: CGFloat = 5 * unit
             NSBezierPath(ovalIn: CGRect(x: p.x - r, y: p.y - r, width: r * 2, height: r * 2)).fill()
         }
 
@@ -75,15 +79,15 @@ final class StageView: NSView {
         for m in markers {
             let p = point(m.nx, m.ny)
             m.color.setFill()
-            let r: CGFloat = 9
+            let r: CGFloat = 9 * unit
             NSBezierPath(ovalIn: CGRect(x: p.x - r, y: p.y - r, width: r * 2, height: r * 2)).fill()
-            drawLabel(m.label, at: CGPoint(x: p.x, y: p.y - r - 9))
+            drawLabel(m.label, at: CGPoint(x: p.x, y: p.y - r - 9 * unit))
         }
     }
 
     private func drawLabel(_ s: String, at center: CGPoint) {
         let attrs: [NSAttributedString.Key: Any] = [
-            .font: NSFont.systemFont(ofSize: 9),
+            .font: NSFont.systemFont(ofSize: 9 * unit),
             .foregroundColor: NSColor.secondaryLabelColor,
         ]
         let size = (s as NSString).size(withAttributes: attrs)
