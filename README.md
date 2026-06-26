@@ -10,7 +10,7 @@ Routes playback through `AVSampleBufferAudioRenderer`, so your music taps straig
 Spatial Audio — spatialized stereo with dynamic head tracking, driven from the system Control
 Center exactly like Apple Music. No setup: enable it and it follows your AirPods.
 
-<img src="/docs/screenshot-control_center.png" alt="System Spatial Audio via Control Center" height="380"/>
+<img src="/docs/screenshot-control_center.png" alt="System Spatial Audio via Control Center" height="400"/>
 
 ### Virtual Surround
 
@@ -19,7 +19,7 @@ speaker freely placeable anywhere around the listener — in-process through App
 HRTF (`HRTFHQ`). Even two-channel music is drawn into that field by an optimized STFT
 primary/ambient upmix to 5.1.
 
-<img src="/docs/screenshot-vsurround_preferences.png" alt="Virtual Surround preferences — virtual speaker rig panner" height="380"/>
+<img src="/docs/screenshot-vsurround_preferences.png" alt="Virtual Surround preferences — virtual speaker rig panner" height="400"/>
 
 
 ## Build
@@ -50,3 +50,33 @@ Working on the engine internals? The output-pipeline contract and design notes l
 - [ ] `source is stalling` shown on stop (matches CoreAudio output; treated as benign for now)
 - [ ] Custom head-tracking for Virtual Surround.
 - [ ] Custom DSP routing around the `AVAudioEnvironmentNode`
+
+## Support
+
+This project is free and open-source. If you like it, please consider:
+
+- Star this project on GitHub
+- <details>
+  <summary>Buy me a coffee in crypto ☕</summary>
+
+  <br/>
+
+  **SOL**
+
+  `2KHGRvqjmrjQ852BF9DeScNFtJtB8e9CgPKtgrTcshvh`
+
+  <img src="/docs/donate-sol.png" alt="Solana" width="140"/>
+
+  ----
+
+  **ETH** (also accepts USDT / ERC-20 tokens)
+
+  `0x4C3826f5eAA9e03F474e6E304015ce8d0bc3C291`
+
+  <img src="/docs/donate-eth.png" alt="Ethereum" width="140"/>
+
+  ----
+
+  </details>
+
+Thank you for your support!

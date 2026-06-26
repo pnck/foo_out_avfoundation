@@ -33,25 +33,49 @@ jobs:
       - name: Install Ninja
         run: brew install ninja
 
+      - name: Decide signing
+        id: sign
+        env:
+          TEAM_ID: ${{ secrets.TEAM_ID }}
+        run: |
+          # Release + TEAM_ID set -> import the cert and sign for real; otherwise (and always for
+          # Debug) ad-hoc ("-"). Never "" — that makes CMake skip codesign and ship it unsigned.
+          if [ "${{ matrix.config }}" = "Release" ] && [ -n "$TEAM_ID" ]; then
+            echo "has_cert=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_cert=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Import Certificate
-        if: matrix.config == 'Release'
+        if: steps.sign.outputs.has_cert == 'true'
         uses: apple-actions/import-codesign-certs@v7
         with:
           p12-file-base64: ${{ secrets.CERTIFICATES_P12_B64 }}
           p12-password: ${{ secrets.CERTIFICATES_P12_PASSWORD }}
 
+      - name: Resolve signing identity
+        id: ident
+        run: |
+          # `codesign -s` matches a cert's common name / SHA-1, NOT a bare Team ID. So pull the
+          # actual identity SHA-1 out of the keychain the cert was just imported into — unambiguous
+          # (the temp keychain holds only our cert) and survives yearly cert renewals. No cert -> "-".
+          if [ "${{ steps.sign.outputs.has_cert }}" = "true" ]; then
+            HASH=$(security find-identity -v -p codesigning | awk 'NR==1{print $2}')
+            if [ -z "$HASH" ]; then
+              echo "::error::TEAM_ID is set but no code-signing identity was found after import." >&2
+              exit 1
+            fi
+            echo "identity=$HASH" >> "$GITHUB_OUTPUT"
+          else
+            echo "identity=-" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Configure
         run: |
-          # Release -> sign with the imported identity; Debug -> ad-hoc ("-").
-          if [ "${{ matrix.config }}" = "Release" ]; then
-            SIGN_ID="${{ secrets.TEAM_ID }}"
-          else
-            SIGN_ID="-"
-          fi
           # Version string is derived inside CMakeLists (Debug -> +git hash, Release -> tag).
           cmake -S . -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=${{ matrix.config }} \
-            -DCODESIGN_IDENTITY="$SIGN_ID"
+            -DCODESIGN_IDENTITY="${{ steps.ident.outputs.identity }}"
 
       - name: Build
         run: cmake --build build --parallel
