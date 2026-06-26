@@ -123,12 +123,12 @@ namespace foo_out_avf
         } // namespace
 
         Layout default_layout() {
-            // Standard 5.1 (ITU-R BS.775): front L/R at ±30°, surrounds at ±110°, mono centre dead
+            // Standard 5.1 (ITU-R BS.775): front L/R at ±30°, surrounds at ±110°, mono center dead
             // ahead, all on a 2 m arc; LFE front and low (its position is non-directional anyway).
             Layout d;
             d.front = SpeakerPair{2.0, 60.0, 0.0, 0.0};    // ±30° in front
             d.rear = SpeakerPair{2.0, 140.0, 180.0, 0.0};  // surrounds at ±110° (180° ± 70°)
-            d.center = Vec3{0.0, 0.0, -2.0};               // mono centre, dead ahead
+            d.center = Vec3{0.0, 0.0, -2.0};               // mono center, dead ahead
             d.lfe = Vec3{0.0, -0.3, -1.0};                 // mono LFE, front-low and fairly close in
             d.frontGainDb = 0.0;                           // unity gain for the mains by default
             d.rearGainDb = 0.0;
@@ -141,10 +141,10 @@ namespace foo_out_avf
 
         SpeakerPositions compute_speakers(const Layout &l) {
             SpeakerPositions s;
-            // Front: left is centre-spacing/2 (more to the left), right is centre+spacing/2.
+            // Front: left is center-spacing/2 (more to the left), right is center+spacing/2.
             s.fl = spherical(l.front.centerAzDeg - l.front.spacingDeg * 0.5, l.front.centerElDeg, l.front.distance);
             s.fr = spherical(l.front.centerAzDeg + l.front.spacingDeg * 0.5, l.front.centerElDeg, l.front.distance);
-            // Rear: handedness flips facing backwards (azimuth ~180°), so left surround = centre+spacing/2.
+            // Rear: handedness flips facing backwards (azimuth ~180°), so left surround = center+spacing/2.
             s.rl = spherical(l.rear.centerAzDeg + l.rear.spacingDeg * 0.5, l.rear.centerElDeg, l.rear.distance);
             s.rr = spherical(l.rear.centerAzDeg - l.rear.spacingDeg * 0.5, l.rear.centerElDeg, l.rear.distance);
             s.c = l.center;
@@ -165,8 +165,8 @@ namespace foo_out_avf
         }
 
         DspParams default_dsp_params() {
-            // −12 dB mains floor, crossover centred at 113 Hz with Q 1.0 (≈ the original 80–160 Hz band),
-            // 2048-pt FFT. These reproduce the previously-hardcoded behaviour.
+            // −12 dB mains floor, crossover centered at 113 Hz with Q 1.0 (≈ the original 80–160 Hz band),
+            // 2048-pt FFT. These reproduce the previously-hardcoded behavior.
             return DspParams{-12.0, 113.0, 1.0, 2048};
         }
 

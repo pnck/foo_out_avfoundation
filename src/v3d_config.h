@@ -29,7 +29,7 @@ namespace foo_out_avf
         };
 
         // A stereo speaker pair, expressed the DAW way: distance from the listener, the angle BETWEEN
-        // its two speakers (spacing), and the azimuth/elevation of the pair's centre (degrees).
+        // its two speakers (spacing), and the azimuth/elevation of the pair's center (degrees).
         // Azimuth 0 = front, + = right; elevation 0 = ear level, + = up.
         struct SpeakerPair {
             double distance;
@@ -38,7 +38,7 @@ namespace foo_out_avf
             double centerElDeg;
         };
 
-        // The whole rig: a front pair + a rear pair, plus a freely-placed mono centre and LFE, with a
+        // The whole rig: a front pair + a rear pair, plus a freely-placed mono center and LFE, with a
         // per-group gain (dB; 0 = unity) so the user can compensate for the distance attenuation that
         // makes far speakers quiet. The gain is applied to the samples in the feed path (see
         // engine_virtual_3d.mm's _channelGain), NOT to the source node's mixer volume — AVAudioMixing
@@ -54,7 +54,7 @@ namespace foo_out_avf
             double lfeGainDb;
         };
 
-        // The six virtual speaker positions in metres (listener at origin; front = -z, right = +x,
+        // The six virtual speaker positions in meters (listener at origin; front = -z, right = +x,
         // up = +y), computed from a Layout. The single source of geometry for both the engine and the
         // UI's 3D preview.
         struct SpeakerPositions {
@@ -62,7 +62,7 @@ namespace foo_out_avf
         };
 
         // The factory-default rig (also the engine's fallback): standard 5.1 (ITU-R BS.775) — front
-        // L/R at ±30°, surrounds at ±110°, mono centre dead ahead, all on a 2 m arc, LFE front-low.
+        // L/R at ±30°, surrounds at ±110°, mono center dead ahead, all on a 2 m arc, LFE front-low.
         // This is what the preferences "Reset to 5.1" button restores.
         Layout default_layout();
 
@@ -74,7 +74,7 @@ namespace foo_out_avf
         // when they change. These are NOT previewed — there's no transient variant.
         struct DspParams {
             double bassFloorDb;  // mains' low-end floor below the crossover (dB; 0 = keep all, −36 ≈ full cut)
-            double bassCutoffHz; // bass-management crossover centre frequency (Hz)
+            double bassCutoffHz; // bass-management crossover center frequency (Hz)
             double bassQ;        // crossover steepness (higher Q = narrower transition band)
             int fftSize;         // STFT window size: 1024 | 2048 | 4096
         };

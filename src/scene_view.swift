@@ -58,7 +58,7 @@ final class SceneRigView: SCNView {
         s.rootNode.addChildNode(camera)
     }
 
-    /// Move the speaker markers to the given positions (metres), order [FL, FR, C, LFE, RL, RR].
+    /// Move the speaker markers to the given positions (meters), order [FL, FR, C, LFE, RL, RR].
     func update(positions: [(Double, Double, Double)]) {
         for (i, node) in speakerNodes.enumerated() where i < positions.count {
             let p = positions[i]

@@ -1,5 +1,5 @@
 //
-//  stereo_upmix.h
+//  dsp_upmix.h
 //  foo_out_avfoundation
 //
 //  Clean-room stereo → 5.1 upmix, so the V3D virtual speaker rig is fed from all six speakers even
@@ -11,7 +11,7 @@
 //  hold). Per STFT bin we form the time-smoothed 2×2 inter-channel covariance and do a PCA-style
 //  primary/ambient decomposition: the dominant eigenvector is the primary's pan direction, the primary
 //  is beamformed toward it, and the AMBIENT is the orthogonal residual (so the rears carry no leaked
-//  lead and don't pump). The discrete stereo image is preserved up front; only the extracted centre
+//  lead and don't pump). The discrete stereo image is preserved up front; only the extracted center
 //  energy is removed from the fronts (energy-aware), and the rears get the ambient residual.
 //
 //    + BASS MANAGEMENT: a smooth power-complementary crossover (≈80–160 Hz) attenuates the five main
@@ -27,8 +27,9 @@
 //
 //  INTERFACE — decoupled push/pull because the STFT is block-based: output frames != input frames (one
 //  block of latency, then ~1:1 throughput). Feed pushes interleaved stereo; the engine pulls however
-//  many 5.1 frames are ready and advances its rings by that count. The vDSP/FFT machinery lives behind
-//  a pImpl so this header has zero Accelerate dependency and stays cheap to include from the .mm.
+//  many 5.1 frames are ready and advances its rings by that count. The FFT lives behind the dsp::FFT
+//  port (dsp_fft.h); this header has zero Accelerate dependency and the adapter (dsp_fft_vdsp.cpp) is
+//  the lone Apple-specific kernel file.
 //
 
 #pragma once
@@ -37,7 +38,7 @@
 #include <cstdint>
 #include <memory>
 
-namespace foo_out_avf
+namespace foo_out_avf::dsp
 {
 
     class StereoUpmixer {
@@ -45,12 +46,17 @@ namespace foo_out_avf
         static constexpr uint32_t kOutChannels = 6; // FL FR C LFE RL RR (5.1 interleave order)
 
         // User-configurable DSP parameters (from v3d_config). The bass-management high-pass on the mains
-        // and the FFT window size; defaults reproduce the original hardcoded behaviour.
+        // and the FFT window size; defaults reproduce the original hardcoded behavior.
         struct Params {
             float bassFloorDb = -12.0f;   // mains' low-end floor below the crossover (dB)
-            float bassCutoffHz = 113.0f;  // crossover centre frequency (Hz)
+            float bassCutoffHz = 113.0f;  // crossover center frequency (Hz)
             float bassQ = 1.0f;           // crossover steepness (higher = narrower transition)
             int fftSize = 2048;           // STFT window: 1024 | 2048 | 4096 (others snap to 2048)
+
+            // Clamp every field to a physically-safe range so the kernel owns its own invariants: any
+            // caller (UI, automation, a corrupted persisted value) is safe, and NaN/Inf collapse to the
+            // defaults instead of poisoning the output. reset() runs this on the way in.
+            Params sanitized() const;
         };
 
         StereoUpmixer();
@@ -85,4 +91,4 @@ namespace foo_out_avf
         std::unique_ptr<Impl> _impl;
     };
 
-} // namespace foo_out_avf
+} // namespace foo_out_avf::dsp

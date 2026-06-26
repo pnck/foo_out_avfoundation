@@ -17,8 +17,8 @@ NS_ASSUME_NONNULL_BEGIN
 // Output mode: YES = Virtual3D, NO = SystemSpatial. (Applies on the next playback start.)
 @property(class, nonatomic) BOOL virtual3DEnabled;
 
-// Front / rear speaker pairs (DAW-style): distance in metres, spacing = angle between the two
-// speakers, azimuth/elevation of the pair centre in degrees.
+// Front / rear speaker pairs (DAW-style): distance in meters, spacing = angle between the two
+// speakers, azimuth/elevation of the pair center in degrees.
 @property(class, nonatomic) double frontDistance;
 @property(class, nonatomic) double frontSpacing;
 @property(class, nonatomic) double frontAzimuth;
@@ -28,7 +28,7 @@ NS_ASSUME_NONNULL_BEGIN
 @property(class, nonatomic) double rearAzimuth;
 @property(class, nonatomic) double rearElevation;
 
-// Freely-placed mono centre and LFE, in metres (listener at origin, front = -z, right = +x, up = +y).
+// Freely-placed mono center and LFE, in meters (listener at origin, front = -z, right = +x, up = +y).
 @property(class, nonatomic) double centerX;
 @property(class, nonatomic) double centerY;
 @property(class, nonatomic) double centerZ;
@@ -45,18 +45,18 @@ NS_ASSUME_NONNULL_BEGIN
 // Global STFT-upmix DSP params (bass-management high-pass on the mains + FFT window). Each write
 // persists and bumps the DSP generation, so a playing engine rebuilds the upmixer live.
 @property(class, nonatomic) double bassFloorDb;  // mains' low-end floor below the crossover (dB)
-@property(class, nonatomic) double bassCutoffHz; // crossover centre frequency (Hz)
+@property(class, nonatomic) double bassCutoffHz; // crossover center frequency (Hz)
 @property(class, nonatomic) double bassQ;        // crossover steepness (higher = narrower transition)
 @property(class, nonatomic) NSInteger fftSize;   // STFT window: 1024 | 2048 | 4096
 
 // Computed positions of the six virtual speakers for the 3D preview, in order
-// [FL, FR, C, LFE, RL, RR]; each entry is @[x, y, z] in metres. The one source of geometry (shared
+// [FL, FR, C, LFE, RL, RR]; each entry is @[x, y, z] in meters. The one source of geometry (shared
 // with the engine), so the preview can never drift from what's actually rendered.
 @property(class, nonatomic, readonly) NSArray<NSArray<NSNumber *> *> *speakerPositions;
 
 // The factory standard-5.1 layout values, in the same order applyLayoutValues: expects (18 numbers:
-// front d/spacing/az/el, rear d/spacing/az/el, centre x/y/z, LFE x/y/z, then the four gains in dB
-// front/rear/centre/LFE). For the UI's "Reset".
+// front d/spacing/az/el, rear d/spacing/az/el, center x/y/z, LFE x/y/z, then the four gains in dB
+// front/rear/center/LFE). For the UI's "Reset".
 @property(class, nonatomic, readonly) NSArray<NSNumber *> *standard51Values;
 
 // Commit a whole layout + mode in one shot (one persist, one generation bump, clears any preview).

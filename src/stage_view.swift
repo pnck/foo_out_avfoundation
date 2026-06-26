@@ -2,7 +2,7 @@
 //  stage_view.swift
 //  foo_out_avfoundation
 //
-//  Top-down "stage" for arranging the virtual speaker rig: the listener sits at the centre, and the
+//  Top-down "stage" for arranging the virtual speaker rig: the listener sits at the center, and the
 //  user drags markers around them. Each draggable marker reports its normalized position (-1...1 on
 //  each axis; +x = right, +y = front) via `onChange(id, nx, ny)`. The view also draws non-draggable
 //  feedback dots for the derived speaker positions. Mouse has 2 DOF and the top-down plane is 2 DOF,
@@ -21,9 +21,9 @@ struct StageMarker {
 
 final class StageView: NSView {
 
-    /// Draggable markers (pair centres + mono speakers).
+    /// Draggable markers (pair centers + mono speakers).
     var markers: [StageMarker] = [] { didSet { needsDisplay = true } }
-    /// Non-draggable feedback dots: derived speaker positions (nx, ny, colour).
+    /// Non-draggable feedback dots: derived speaker positions (nx, ny, color).
     var dots: [(CGFloat, CGFloat, NSColor)] = [] { didSet { needsDisplay = true } }
     /// Fired while dragging a marker: (markerID, nx, ny).
     var onChange: ((String, CGFloat, CGFloat) -> Void)?
@@ -62,7 +62,7 @@ final class StageView: NSView {
         drawLabel("FRONT", at: CGPoint(x: cx, y: bounds.maxY - 12))
         drawLabel("REAR", at: CGPoint(x: cx, y: 6))
 
-        // listener at the centre
+        // listener at the center
         NSColor.secondaryLabelColor.setFill()
         let lr: CGFloat = 5 * unit
         NSBezierPath(ovalIn: CGRect(x: cx - lr, y: cy - lr, width: lr * 2, height: lr * 2)).fill()

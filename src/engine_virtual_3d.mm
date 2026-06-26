@@ -15,7 +15,7 @@
 //  `position`; AVAudioEnvironmentNode only knows XYZ point sources, so that abstraction lives here.
 //  Channel → speaker mapping is by VIRTUAL speaker count (5.1 → front pair + center + LFE + rear pair).
 //  Plain stereo would only drive the front pair, leaving the rig half dead, so a stereo source is first
-//  upmixed to 5.1 (clean-room, stereo_upmix.h) — the virtual speaker count then exceeds the input count.
+//  upmixed to 5.1 (clean-room, dsp_upmix.h) — the virtual speaker count then exceeds the input count.
 //
 //  FEED MODEL — a PULL graph, unlike the default backend's push into AVSampleBufferAudioRenderer.
 //  Each AVAudioSourceNode pulls audio from a real-time render thread; foobar2000 pushes from its
@@ -50,7 +50,7 @@
 #include <cstring>
 
 #include "common/lead.h" // shared fsec / lead floors / currentOutputFloor — DO NOT copy-paste
-#include "stereo_upmix.h" // clean-room stereo → 5.1 upmix (V3D-only; feeds all six virtual speakers)
+#include "dsp_upmix.h" // clean-room stereo → 5.1 upmix (V3D-only; feeds all six virtual speakers)
 
 // This TU is not inside namespace foo_out_avf (the @implementation is ObjC), so alias the config
 // namespace to keep the v3d_config:: call sites short, and bring the shared lead-policy names
@@ -86,11 +86,11 @@ namespace
     }
 
     // How many VIRTUAL speakers to build for a given input channel count. Stereo is upmixed to 5.1 so
-    // the rear pair / centre / LFE aren't dead (the V3D feature is meaningless if only the front pair
+    // the rear pair / center / LFE aren't dead (the V3D feature is meaningless if only the front pair
     // plays); everything else maps its content channels straight onto speakers (no upmix). Mono stays
-    // mono (a single centre speaker), matching speakerForChannel's count==1 case.
+    // mono (a single center speaker), matching speakerForChannel's count==1 case.
     static uint32_t virtualChannelsForInput(uint32_t inputChannels) {
-        return (inputChannels == 2) ? foo_out_avf::StereoUpmixer::kOutChannels : inputChannels;
+        return (inputChannels == 2) ? foo_out_avf::dsp::StereoUpmixer::kOutChannels : inputChannels;
     }
 
     // The virtual speaker geometry (pair distance/spacing/azimuth/elevation → XYZ) lives in v3d_config
@@ -106,7 +106,7 @@ namespace
     static AVAudio3DPoint speakerForChannel(const v3d_config::SpeakerPositions &s, uint32_t count, uint32_t idx) {
         switch (count) {
         case 1:
-            return pointFromVec(s.c); // mono → centre
+            return pointFromVec(s.c); // mono → center
         case 2:
             return pointFromVec((idx == 0) ? s.fl : s.fr);
         case 3:
@@ -221,7 +221,7 @@ static OSStatus v3d_default_output_changed(AudioObjectID inObjectID, UInt32 inNu
     uint32_t _inputChannels;           // number of channels foobar feeds (may differ from _channelCount
                                        // when we upmix stereo → 5.1)
     bool _upmixActive;                 // true when input is stereo: deinterleave the upmix output, not raw input
-    foo_out_avf::StereoUpmixer _upmixer;
+    foo_out_avf::dsp::StereoUpmixer _upmixer;
     bool _engineFailed;                // AVAudioEngine wouldn't start/build — stop feeding, surface it
 
     fsec _configured;
@@ -409,12 +409,12 @@ static OSStatus v3d_default_output_changed(AudioObjectID inObjectID, UInt32 inNu
     _channelCount = channels;
     _upmixActive = (channels != inputChannels);
     if (_upmixActive) {
-        const v3d_config::DspParams dsp = v3d_config::dsp_params();
-        foo_out_avf::StereoUpmixer::Params p;
-        p.bassFloorDb = (float)dsp.bassFloorDb;
-        p.bassCutoffHz = (float)dsp.bassCutoffHz;
-        p.bassQ = (float)dsp.bassQ;
-        p.fftSize = dsp.fftSize;
+        const v3d_config::DspParams dspCfg = v3d_config::dsp_params();
+        foo_out_avf::dsp::StereoUpmixer::Params p;
+        p.bassFloorDb = (float)dspCfg.bassFloorDb;
+        p.bassCutoffHz = (float)dspCfg.bassCutoffHz;
+        p.bassQ = (float)dspCfg.bassQ;
+        p.fftSize = dspCfg.fftSize;
         _upmixer.reset(sampleRate, p);
     }
     _seenDspGen = v3d_config::dsp_generation();
@@ -447,7 +447,7 @@ static OSStatus v3d_default_output_changed(AudioObjectID inObjectID, UInt32 inNu
                                      AVAudioFrameCount frameCount, AudioBufferList *outputData) {
                    (void)timestamp;
                    float *out = (float *)outputData->mBuffers[0].mData;
-                   // Honour the output buffer's real capacity, not just frameCount, so an unexpected
+                   // Honor the output buffer's real capacity, not just frameCount, so an unexpected
                    // oversized request can never overflow it.
                    const size_t cap = outputData->mBuffers[0].mDataByteSize / sizeof(float);
                    const size_t need = std::min((size_t)frameCount, cap); // mono → samples == frames
@@ -489,10 +489,15 @@ static OSStatus v3d_default_output_changed(AudioObjectID inObjectID, UInt32 inNu
 
     [_engine connect:_env to:_engine.mainMixerNode format:nil];
     } @catch (NSException *ex) {
-        V3D_DIAG(@"[V3D] graph build FAILED: %@ — %@", ex.name, ex.reason ?: @"(nil)");
-        _monoFormat = nil; // force a retry on the next feed (and keep surfacing the error)
+        // Latch the failure (like the system backend's _formatUnsupported): otherwise canAcceptMore /
+        // freeSampleCount keep reporting room, foobar keeps offering, every feed re-enters this build and
+        // re-throws — a 100%-CPU busy-loop on a persistently-failing graph. With the latch the backpressure
+        // methods tell foobar to stop; a later successful (re)build clears it via startEngineIfReady.
+        [self logMessage:@"[V3D] graph build FAILED: %@ — %@", ex.name, ex.reason ?: @"(nil)"];
+        _monoFormat = nil; // force a rebuild attempt if a genuinely new format ever arrives
         _channelCount = 0;
         _inputChannels = 0;
+        _engineFailed = true;
         return false;
     }
 
@@ -644,7 +649,9 @@ static OSStatus v3d_default_output_changed(AudioObjectID inObjectID, UInt32 inNu
         if (wasRunning) {
             [_engine stop];
         }
-        [self rebuildGraphForSampleRate:_shared->sampleRate inputChannels:_inputChannels];
+        if (![self rebuildGraphForSampleRate:_shared->sampleRate inputChannels:_inputChannels]) {
+            return 0; // rebuild failed (graph threw) — _engineFailed is latched; don't touch the half-built rings
+        }
         [self startEngineIfReady];
     }
 
@@ -672,18 +679,18 @@ static OSStatus v3d_default_output_changed(AudioObjectID inObjectID, UInt32 inNu
     size_t produced = take;
     if (_upmixActive) {
         _upmixer.pushStereo(_feedStaging.data(), take);
-        // Pull what's ready, bounded by the physical ring space (the lead budget is already honoured by
+        // Pull what's ready, bounded by the physical ring space (the lead budget is already honored by
         // freeFrames, which counts the upmixer's pending output too).
         const size_t buffered = _rings[0]->buffered();
         const size_t ringRoom = (_rings[0]->capacity > buffered) ? (_rings[0]->capacity - buffered) : 0;
         const size_t want = std::min(_upmixer.available(), ringRoom);
-        const size_t upSamples = want * foo_out_avf::StereoUpmixer::kOutChannels;
+        const size_t upSamples = want * foo_out_avf::dsp::StereoUpmixer::kOutChannels;
         if (_upmixStaging.size() < upSamples) {
             _upmixStaging.resize(upSamples);
         }
         produced = _upmixer.pull(_upmixStaging.data(), want);
         src = _upmixStaging.data();
-        srcChannels = foo_out_avf::StereoUpmixer::kOutChannels;
+        srcChannels = foo_out_avf::dsp::StereoUpmixer::kOutChannels;
     }
 
     const size_t nch = std::min<size_t>(srcChannels, _rings.size());
@@ -801,6 +808,9 @@ static OSStatus v3d_default_output_changed(AudioObjectID inObjectID, UInt32 inNu
     }
     double secs = [self lead].count();
     if (_upmixActive && _shared->sampleRate > 0) {
+        // Match freeFrames' banked accounting: the upmixer's produced-but-not-yet-pulled output is also
+        // queued ahead of the clock, plus its one-block algorithmic latency.
+        secs += (double)_upmixer.available() / (double)_shared->sampleRate;
         secs += (double)_upmixer.latencyFrames() / (double)_shared->sampleRate; // STFT algorithmic latency
     }
     return (secs > 0.0 && secs == secs) ? secs : 0.0;

@@ -10,7 +10,7 @@
 //
 //  Output pipeline model (see README.md "How it works — the output pipeline contract"):
 //  foobar2000 is the DEEP buffer; this engine is a SHALLOW sink that keeps only a small
-//  playback lead (= foobar's configured buffer length) enqueued in AVSampleBufferAudioRenderer. We honour
+//  playback lead (= foobar's configured buffer length) enqueued in AVSampleBufferAudioRenderer. We honor
 //  foobar's partial-consumption contract (take what fits, return the count, foobar keeps the
 //  rest) and its priming contract (accumulate the lead with the clock stopped, then start).
 //

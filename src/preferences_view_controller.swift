@@ -3,7 +3,7 @@
 //  foo_out_avfoundation
 //
 //  The component's preferences page for the virtual speaker rig. A mode switch, a top-down stage where
-//  you drag the front pair, rear pair, mono centre and LFE around the listener, sliders for the
+//  you drag the front pair, rear pair, mono center and LFE around the listener, sliders for the
 //  per-pair spacing/elevation, mono height, and per-group gain, plus a live SceneKit preview.
 //
 //  Editing is a PREVIEW transaction: every edit updates the working layout, the on-screen preview, AND
@@ -20,7 +20,7 @@ import AppKit
 @objc(V3DPreferencesViewController)
 final class V3DPreferencesViewController: NSViewController {
 
-    // Half-extent of the stage in metres (pad edge = RANGE m from the listener).
+    // Half-extent of the stage in meters (pad edge = RANGE m from the listener).
     private let range: CGFloat = 4.0
 
     // Working (unsaved) layout. Mirrors v3d_config::Layout; committed to V3DConfig only on Save.
@@ -60,7 +60,7 @@ final class V3DPreferencesViewController: NSViewController {
     private let fftSizes = [1024, 2048, 4096]
 
     // Every group is edited in the SAME spherical terms (distance / azimuth / elevation), so the mono
-    // centre + LFE behave exactly like the pairs; the pairs add spacing, everything has a gain.
+    // center + LFE behave exactly like the pairs; the pairs add spacing, everything has a gain.
     private let frontDistance_ = NSSlider()
     private let frontAzimuth_ = NSSlider()
     private let frontElevation_ = NSSlider()
@@ -183,7 +183,7 @@ final class V3DPreferencesViewController: NSViewController {
         addRow("Distance", rearDistance_, rearDistanceValue, 0.3, 4.0, #selector(onRearDistance))
         addRow("Spacing", rearSpacing_, rearSpacingValue, 0, 180, #selector(onRearSpacing))
         addRow("Gain (dB)", rearGain_, rearGainValue, -36, 24, #selector(onRearGain))
-        addSection("Centre")
+        addSection("Center")
         addRow("Azimuth", centerAzimuth_, centerAzimuthValue, -180, 180, #selector(onCenterAzimuth))
         addRow("Elevation", centerElevation_, centerElevationValue, -90, 90, #selector(onCenterElevation))
         addRow("Distance", centerDistance_, centerDistanceValue, 0.3, 4.0, #selector(onCenterDistance))
@@ -355,7 +355,7 @@ final class V3DPreferencesViewController: NSViewController {
         let gap: CGFloat = 10
         let innerW = W - 2 * pad
 
-        // The content column is a CENTRED block whose width is the two panels' span. The gap between the
+        // The content column is a CENTERED block whose width is the two panels' span. The gap between the
         // panels widens a little with the window; each panel fills half the remaining width, clamped to
         // [320, 700] (shrinking below 320 only when the pane is too narrow to fit two). So the block grows
         // with the window up to ~1470 then stops, and the scroll list / header / buttons align to it.
@@ -363,7 +363,7 @@ final class V3DPreferencesViewController: NSViewController {
         let fitSide = (innerW - panelGap) / 2
         let side = fitSide >= 320 ? min(fitSide, 700) : max(140, fitSide)
         let blockW = side * 2 + panelGap
-        let bx = pad + max(0, (innerW - blockW) / 2) // left edge of the centred block
+        let bx = pad + max(0, (innerW - blockW) / 2) // left edge of the centered block
 
         // Header (mode toggle).
         var y: CGFloat = pad
@@ -529,7 +529,7 @@ final class V3DPreferencesViewController: NSViewController {
         ]
     }
 
-    // MARK: - normalized <-> metres mapping
+    // MARK: - normalized <-> meters mapping
 
     private func pairMarker(az: Double, dist: Double) -> (CGFloat, CGFloat) {
         let r = CGFloat(dist) / range
@@ -649,7 +649,7 @@ final class V3DPreferencesViewController: NSViewController {
     @objc private func onRearElevation() { rearEl = rearElevation_.doubleValue; refreshDerived() }
     @objc private func onRearSpacing() { rearSpacing = rearSpacing_.doubleValue; refreshDerived() }
     @objc private func onRearGain() { rearGainDb = rearGain_.doubleValue; refreshDerived() }
-    // Centre (mono; stored cartesian, edited spherical)
+    // Center (mono; stored cartesian, edited spherical)
     @objc private func onCenterDistance() { setCenter(dist: centerDistance_.doubleValue) }
     @objc private func onCenterAzimuth() { setCenter(az: centerAzimuth_.doubleValue) }
     @objc private func onCenterElevation() { setCenter(el: centerElevation_.doubleValue) }

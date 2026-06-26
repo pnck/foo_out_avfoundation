@@ -91,6 +91,12 @@ namespace foo_out_avf
             if (is_active && is_paused) {
                 engine.pause(); // preserve the paused state across the rebuild
             }
+            if (!is_active) {
+                // The new backend wouldn't start. We've already consumed the generation, so we won't spin
+                // retrying on the playback thread — but surface it (otherwise it's a silent dead output until
+                // the user toggles the mode again, which bumps the generation and re-attempts the switch).
+                fb2k::inMainThread([]() { FB2K_console_print("[AVF] mode switch failed: new backend did not enable"); });
+            }
         }
 
     public:
